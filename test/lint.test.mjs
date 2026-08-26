@@ -1,20 +1,21 @@
 import { describe, test, expect } from "bun:test";
 import { lintSpec } from "./harness.mjs";
-import { decoratorLayer } from "../lib/layers.mjs";
+import { decoratorLayer, sectionRank } from "../lib/layers.mjs";
 
 const USERS = `namespace \`public\`;
-@rls
 @pk("id")
-@grant("authenticated", "select")
 model users {
   @default("gen_random_uuid()") id: uuid;
   email?: text;
 }
-@@policy(users, "self read", "for select to authenticated using (id = auth.uid())");
 @function("plpgsql") op touch_updated_at(): trigger;
-`;
 
-const USERS_IMPL = `// ── impl ──────────────────────────────────────────────
+// ── security ──────────────────────────────────────────
+@@rls(users);
+@@grant(users, "authenticated", "select");
+@@policy(users, "self read", "for select to authenticated using (id = auth.uid())");
+
+// ── impl ──────────────────────────────────────────────
 @@index(users, "users_email_idx on (email)");
 @@trigger(users, "users_touch", "before update for each row", touch_updated_at);
 @@doc(users, "foreign decorators are exempt from the layer rules");
@@ -26,55 +27,61 @@ const CRON = `namespace cron;
 op nightly_probe(): void;
 `;
 
-describe("layer partition", () => {
-  test("unlisted_decorator_fails_closed_to_contract", () => {
+describe("sections and layers", () => {
+  test("unlisted_decorator_defaults_data_and_contract", () => {
     expect(decoratorLayer("brand_new_decorator")).toBe("contract");
-    expect(decoratorLayer("trigger")).toBe("impl");
+    expect(sectionRank("brand_new_decorator")).toBe(0);
+    expect(sectionRank("grant")).toBe(1);
+    expect(sectionRank("trigger")).toBe(2);
   });
 });
 
-describe("layer ordering lint", () => {
-  test("colocated_ledger_lints_clean", async () => {
+describe("section ordering lint", () => {
+  test("sectioned_spec_lints_clean", async () => {
     const violations = await lintSpec({
-      "identity/users.tsp": USERS + "\n" + USERS_IMPL,
+      "identity/users.tsp": USERS,
       "identity/cron.tsp": CRON,
     });
     expect(violations).toEqual([]);
   });
 
-  test("pure_impl_overflow_file_lints_clean", async () => {
+  test("inline_rls_on_header_flags", async () => {
     const violations = await lintSpec({
-      "identity/users.tsp": USERS,
-      "identity/users.ledger.tsp": `namespace \`public\`;\n${USERS_IMPL}`,
-    });
-    expect(violations).toEqual([]);
-  });
-
-  test("impl_before_contract_flags", async () => {
-    const violations = await lintSpec({
-      "identity/users.tsp":
-        `namespace \`public\`;\n@@index(users, "users_email_idx on (email)");\n` + USERS.replace("namespace `public`;\n", ""),
-    });
-    expect(violations.length).toBe(1);
-    expect(violations[0].message).toContain("impl");
-    expect(violations[0].file.endsWith("users.tsp")).toBe(true);
-    expect(violations[0].line).toBeGreaterThan(0);
-  });
-
-  test("contract_after_impl_flags", async () => {
-    const violations = await lintSpec({
-      "identity/users.tsp": USERS + "\n" + USERS_IMPL + `@@grant(users, "anon", "select");\n`,
-    });
-    expect(violations.length).toBe(1);
-    expect(violations[0].message).toContain("contract");
-  });
-
-  test("inline_impl_decorator_must_be_augment", async () => {
-    const violations = await lintSpec({
-      "identity/runs.tsp": `namespace \`public\`;\n@partition_by("range (started_at)")\nmodel runs { id: uuid; started_at: timestamptz; }\n`,
+      "identity/users.tsp": `namespace \`public\`;\n@rls model plain { id: uuid; }\n`,
     });
     expect(violations.length).toBe(1);
     expect(violations[0].message).toContain("augment");
+  });
+
+  test("inline_grant_on_op_flags", async () => {
+    const violations = await lintSpec({
+      "identity/fns.tsp": `namespace \`public\`;\n@grant("authenticated", "execute") @function("sql stable") op f(): text;\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("augment");
+  });
+
+  test("security_after_impl_flags", async () => {
+    const violations = await lintSpec({
+      "identity/users.tsp": USERS + `@@grant(users, "anon", "select");\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("security");
+  });
+
+  test("data_after_security_flags", async () => {
+    const violations = await lintSpec({
+      "identity/pair.tsp": `namespace \`public\`;\nmodel a { id: uuid; }\n@@rls(a);\nmodel b { id: uuid; }\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("data");
+  });
+
+  test("view_security_flags_inline_ok", async () => {
+    const violations = await lintSpec({
+      "kbyg/views.tsp": `namespace \`public\`;\n@security_invoker @view model v { id: uuid; }\n\n@@grant(v, "authenticated", "select");\n`,
+    });
+    expect(violations).toEqual([]);
   });
 
   test("contract_declaration_after_cron_op_flags", async () => {
@@ -82,6 +89,6 @@ describe("layer ordering lint", () => {
       "identity/mixed.tsp": CRON + `\nmodel stray { id: string; }\n`,
     });
     expect(violations.length).toBe(1);
-    expect(violations[0].message).toContain("contract");
+    expect(violations[0].message).toContain("data");
   });
 });
