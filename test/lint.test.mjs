@@ -116,4 +116,19 @@ describe("model decorator formatting", () => {
     });
     expect(violations).toEqual([]);
   });
+
+  test("property_decorator_on_property_line_flags", async () => {
+    const violations = await lintSpec({
+      "identity/four.tsp": `namespace \`public\`;\nmodel a { id: uuid; }\nmodel b {\n  @references(a.id) a_id: uuid;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("own line");
+  });
+
+  test("stacked_property_decorator_clean", async () => {
+    const violations = await lintSpec({
+      "identity/five.tsp": `namespace \`public\`;\nmodel a { id: uuid; }\nmodel b {\n  @references(a.id)\n  a_id: uuid;\n}\n`,
+    });
+    expect(violations).toEqual([]);
+  });
 });

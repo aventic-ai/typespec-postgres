@@ -80,16 +80,25 @@ function applications(type, files, problems, declRank = 0) {
   }
 }
 
-// A model's header reads as a list of facts: no inline decorator shares the
-// model's line or another decorator's line. Applies to every decorator,
-// foreign included — formatting is file discipline, not vocabulary — but
-// never double-flags one already reported as augment-required.
+// A model — header and body — reads as a list of facts: no inline decorator
+// shares its declaration's line or another decorator's line, so property
+// lines stay bare `name: type;` with their facts stacked above. Applies to
+// every decorator, foreign included — formatting is file discipline, not
+// vocabulary — but never double-flags one already reported as
+// augment-required. Op parameters are exempt: signatures read as parameter
+// lists.
 function ownLineProblem(model, problems) {
-  const idLoc = getSourceLocation(model.node?.id ?? model.node);
-  if (!idLoc || isLibrary(idLoc.file.path)) return;
-  const modelLine = idLoc.file.getLineAndCharacterOfPosition(idLoc.pos).line;
-  const seen = new Set([modelLine]);
-  for (const d of model.decorators ?? []) {
+  if (ownLineViolation(model, `model ${model.name}`, problems)) return;
+  for (const [, prop] of model.properties) {
+    if (ownLineViolation(prop, `${model.name}.${prop.name}`, problems)) return; // one per model
+  }
+}
+
+function ownLineViolation(type, label, problems) {
+  const idLoc = getSourceLocation(type.node?.id ?? type.node);
+  if (!idLoc || isLibrary(idLoc.file.path)) return false;
+  const seen = new Set([idLoc.file.getLineAndCharacterOfPosition(idLoc.pos).line]);
+  for (const d of type.decorators ?? []) {
     if (!!d.node && "targetType" in d.node) continue; // augments live in sections
     const name = d.definition?.name?.replace(/^@/, "") ?? "?";
     if (VOCAB.has(name) && sectionRank(name) > 0 && !INLINE_OK.has(name)) continue; // flagged as augment-required
@@ -97,11 +106,12 @@ function ownLineProblem(model, problems) {
     if (!loc) continue;
     const line = loc.file.getLineAndCharacterOfPosition(loc.pos).line;
     if (seen.has(line)) {
-      problems.push(problem(loc, `@${name} on model ${model.name} takes its own line`));
-      return; // one violation per model
+      problems.push(problem(loc, `@${name} on ${label} takes its own line`));
+      return true;
     }
     seen.add(line);
   }
+  return false;
 }
 
 function declaration(type, label, rank, files) {
