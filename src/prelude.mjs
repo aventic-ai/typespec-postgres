@@ -1,10 +1,10 @@
 // Shadow prelude: minimal stand-ins for platform-owned surfaces the spec's
 // objects reference. Signature-compatible stubs; never compared.
-export const PRELUDE = `
+export const prelude = (db) => `
 -- Supabase installs extensions outside public, reachable via search_path.
 CREATE SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
-ALTER DATABASE pgspec_shadow SET search_path = public, extensions;
+ALTER DATABASE ${db} SET search_path = public, extensions;
 SET search_path = public, extensions;
 
 CREATE SCHEMA auth;

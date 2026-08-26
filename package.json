@@ -1,6 +1,9 @@
 {
-  "name": "typespec-postgres",
+  "name": "@aventic/pgspec",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "tspMain": "lib/main.tsp",
+  "bin": { "pgspec-check": "./src/check.mjs" },
   "dependencies": { "@typespec/compiler": "1.15.0" }
 }

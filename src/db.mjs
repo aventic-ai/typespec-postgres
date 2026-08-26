@@ -1,22 +1,26 @@
-// psql wrapper: run a query against the local aventic-gx Supabase cluster,
-// return rows as parsed JSON. No driver dependency — psql is the client.
+// psql wrapper: run queries against the Postgres reached through the
+// SPEC_DB_* env boundary, return rows as parsed JSON. No driver
+// dependency — psql is the client. The consumer owns knowing where its
+// credentials live; the tool never guesses from files.
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
 
-const ENV = "/home/jessica/src/aventic/aventic-gx/local/supabase/.env";
+const host = () => process.env.SPEC_DB_HOST ?? "127.0.0.1";
+const port = () => process.env.SPEC_DB_PORT ?? "54322";
+const user = () => process.env.SPEC_DB_USER ?? "postgres";
+
+/** The live database the spec is checked against. */
+export const liveDb = () => process.env.SPEC_DB_NAME ?? "postgres";
 
 export function password() {
-  if (process.env.SPEC_DB_PASSWORD) return process.env.SPEC_DB_PASSWORD;
-  if (!existsSync(ENV)) throw new Error(`no db password: ${ENV} missing (start the local stack)`);
-  const line = readFileSync(ENV, "utf8").split("\n").find((l) => l.startsWith("POSTGRES_PASSWORD="));
-  if (!line) throw new Error(`POSTGRES_PASSWORD missing from ${ENV}`);
-  return line.slice("POSTGRES_PASSWORD=".length).trim();
+  const p = process.env.SPEC_DB_PASSWORD;
+  if (!p) throw new Error("SPEC_DB_PASSWORD is not set");
+  return p;
 }
 
 export function sql(db, query, opts = {}) {
   return execFileSync(
     "psql",
-    ["-h", "127.0.0.1", "-p", "54322", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-tA", "-c", query],
+    ["-h", host(), "-p", port(), "-U", user(), "-d", db, "-v", "ON_ERROR_STOP=1", "-tA", "-c", query],
     { encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: { ...process.env, PGPASSWORD: password() }, ...opts },
   );
 }
@@ -31,7 +35,7 @@ export function rows(db, query) {
 export function script(db, text) {
   return execFileSync(
     "psql",
-    ["-h", "127.0.0.1", "-p", "54322", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
+    ["-h", host(), "-p", port(), "-U", user(), "-d", db, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
     { encoding: "utf8", input: text, maxBuffer: 512 * 1024 * 1024, env: { ...process.env, PGPASSWORD: password() } },
   );
 }

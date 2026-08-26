@@ -7,7 +7,6 @@ extern dec rls(target: Model);
 extern dec external(target: Model);
 extern dec pk(target: Model, cols: valueof string, name?: valueof string);
 extern dec partition_by(target: Model, spec: valueof string);
-extern dec unmanaged_partitions(target: Model, pattern: valueof string);
 extern dec check(target: Model | ModelProperty, expr: valueof string, name?: valueof string);
 extern dec constraint(target: Model, name: valueof string, def: valueof string);
 extern dec default(target: ModelProperty, sql: valueof string);
