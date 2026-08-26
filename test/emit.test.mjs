@@ -22,9 +22,9 @@ describe("emit layering enforcement", () => {
 
   test("layering_violation_rejected_like_a_compile_error", async () => {
     const main = specDir(
-      `namespace \`public\`;\nmodel probes { id: uuid; }\n` +
-      `@@index(probes, "probes_id_idx on (id)");\n`,
+      `namespace \`public\`;\n@@index(probes, "probes_id_idx on (id)");\n` +
+      `model probes { id: uuid; }\n`,
     );
-    expect(emit(main)).rejects.toThrow(/does not lint.*@index/s);
+    expect(emit(main)).rejects.toThrow(/does not lint.*@@index/s);
   });
 });
