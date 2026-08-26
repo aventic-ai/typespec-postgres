@@ -5,6 +5,7 @@ import { compile, NodeHost, getSourceLocation } from "@typespec/compiler";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { modelState, opState, propState } from "../lib/index.js";
+import { lintLayers } from "./lint.mjs";
 
 const SCALAR_TO_PG = {
   text: "text", uuid: "uuid", timestamptz: "timestamp with time zone",
@@ -36,6 +37,10 @@ export async function emit(mainTsp) {
   const errs = program.diagnostics.filter((d) => d.severity === "error");
   if (errs.length) {
     throw new Error(`spec does not compile:\n${errs.slice(0, 10).map((e) => `${e.code}: ${e.message}`).join("\n")}`);
+  }
+  const layering = lintLayers(program);
+  if (layering.length) {
+    throw new Error(`spec does not lint:\n${layering.slice(0, 10).map((v) => `${v.file}:${v.line} ${v.message}`).join("\n")}`);
   }
   const glob = program.getGlobalNamespaceType();
   const pub = glob.namespaces.get("public");
