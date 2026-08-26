@@ -8,15 +8,22 @@ import { modelState, opState, propState } from "../lib/index.js";
 import { lintLayers } from "./lint.mjs";
 
 const SCALAR_TO_PG = {
-  text: "text", uuid: "uuid", timestamptz: "timestamp with time zone",
-  timestamp: "timestamp without time zone", integer: "integer", jsonb: "jsonb",
-  json: "json", boolean: "boolean", bigint: "bigint", smallint: "smallint",
-  numeric: "numeric", date: "date", bytea: "bytea", float8: "double precision",
-  inet: "inet", trigger: "trigger",
+  text_s: "text", uuid_s: "uuid", timestamptz_s: "timestamp with time zone",
+  timestamp_s: "timestamp without time zone", integer_s: "integer", jsonb_s: "jsonb",
+  json_s: "json", boolean_s: "boolean", bigint_s: "bigint", smallint_s: "smallint",
+  numeric_s: "numeric", date_s: "date", bytea_s: "bytea", float8_s: "double precision",
+  inet_s: "inet", trigger: "trigger",
 };
 
 function pgType(type, st = {}) {
   if (st.pg_type) return st.pg_type;
+  if (type.kind === "Union") {
+    // the lib's X = X_s | sql aliases (and the explicit array escape):
+    // the sql marker carries defaults, never the column's type
+    const real = [...type.variants.values()].map((v) => v.type)
+      .find((t) => !(t.kind === "Scalar" && t.name === "sql"));
+    return pgType(real, st);
+  }
   if (type.kind === "Scalar") return SCALAR_TO_PG[type.name] ?? type.name;
   if (type.kind === "Enum") return type.name;
   if (type.kind === "Model" && type.name === "Array") return `${pgType(type.indexer.value)}[]`;
@@ -30,6 +37,24 @@ const q = (name) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replaceAl
 function litToSql(v) {
   if (typeof v === "string") return `'${v.replaceAll("'", "''")}'`;
   return String(v);
+}
+
+// A default in value position, by value kind: sql.of(expr) is verbatim SQL;
+// everything else is a literal — the bright line is structural.
+function valueToSql(dv) {
+  switch (dv.valueKind) {
+    case "ScalarValue":
+      if (dv.value.name !== "of") throw new Error(`unsupported constructor ${dv.value.name} in default`);
+      return dv.value.args[0].value;
+    case "StringValue": return litToSql(dv.value);
+    case "NumericValue": return String(dv.value.asNumber() ?? dv.value.asBigInt());
+    case "BooleanValue": return String(dv.value);
+    case "EnumValue": {
+      const m = dv.value;
+      return `${litToSql(typeof m.value === "string" ? m.value : m.name)}::${m.enum.name}`;
+    }
+  }
+  throw new Error(`unsupported default value kind ${dv.valueKind}`);
 }
 
 export async function emit(mainTsp) {
@@ -82,8 +107,7 @@ export async function emit(mainTsp) {
     const params = [...op.parameters.properties.values()].map((p) => {
       const ps = propState(p);
       let s = `${q(p.name)} ${pgType(p.type, ps)}`;
-      if (ps.arg_default) s += ` DEFAULT ${ps.arg_default}`;
-      else if (p.defaultValue) s += ` DEFAULT ${litToSql(p.defaultValue.value ?? p.defaultValue)}`;
+      if (p.defaultValue) s += ` DEFAULT ${valueToSql(p.defaultValue)}`;
       else if (p.optional) s += ` DEFAULT NULL`;
       return s;
     });
@@ -141,10 +165,11 @@ export async function emit(mainTsp) {
       let c = `${q(p.name)} ${pgType(p.type, ps)}`;
       if (ps.generated) c += ` GENERATED ALWAYS AS (${ps.generated}) STORED`;
       else if (ps.identity) c += ` GENERATED ${ps.identity === "always" ? "ALWAYS" : "BY DEFAULT"} AS IDENTITY`;
-      else if (ps.default) {
-        c += ` DEFAULT ${ps.default}`;
+      else if (p.defaultValue) {
+        const def = valueToSql(p.defaultValue);
+        c += ` DEFAULT ${def}`;
         // serial-style defaults imply their sequence; create it first
-        const seq = ps.default.match(/nextval\('(?:public\.)?([^':]+)'/)?.[1];
+        const seq = def.match(/nextval\('(?:public\.)?([^':]+)'/)?.[1];
         if (seq) sequences.add(seq);
       }
       if (!p.optional && !ps.generated) c += " NOT NULL";

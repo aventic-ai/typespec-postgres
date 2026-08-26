@@ -5,7 +5,7 @@ import { decoratorLayer, sectionRank } from "../lib/layers.mjs";
 const USERS = `namespace \`public\`;
 @pk("id")
 model users {
-  @default("gen_random_uuid()") id: uuid;
+  id: uuid = sql.of("gen_random_uuid()");
   email?: text;
 }
 @function("plpgsql") op touch_updated_at(): trigger;
