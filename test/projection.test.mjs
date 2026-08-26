@@ -23,7 +23,7 @@ async function emitView(model) {
 describe("declared projections", () => {
   test("emit_returns_declared_view_projections", async () => {
     const { projections } = await emitView(
-      `@security_invoker @view model v { id: uuid; created_at?: timestamptz; }`,
+      `@security_invoker\n@view\nmodel v { id: uuid; created_at?: timestamptz; }`,
     );
     expect(projections).toEqual({
       v: [["id", "uuid"], ["created_at", "timestamp with time zone"]],

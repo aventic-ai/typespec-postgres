@@ -38,6 +38,7 @@ function collectNamespace(ns, nsName, files, problems) {
   for (const [, model] of ns.models) {
     declaration(model, `model ${model.name}`, 0, files);
     applications(model, files, problems);
+    ownLineProblem(model, problems);
     for (const [, prop] of model.properties) applications(prop, files, problems);
   }
   for (const [, op] of ns.operations) {
@@ -76,6 +77,30 @@ function applications(type, files, problems, declRank = 0) {
     // inline decorators share their declaration's span; only augments
     // participate in ordering as their own statements
     if (augment) item(files, loc, rank, `@@${name}`);
+  }
+}
+
+// A model's header reads as a list of facts: no inline decorator shares the
+// model's line or another decorator's line. Applies to every decorator,
+// foreign included — formatting is file discipline, not vocabulary — but
+// never double-flags one already reported as augment-required.
+function ownLineProblem(model, problems) {
+  const idLoc = getSourceLocation(model.node?.id ?? model.node);
+  if (!idLoc || isLibrary(idLoc.file.path)) return;
+  const modelLine = idLoc.file.getLineAndCharacterOfPosition(idLoc.pos).line;
+  const seen = new Set([modelLine]);
+  for (const d of model.decorators ?? []) {
+    if (!!d.node && "targetType" in d.node) continue; // augments live in sections
+    const name = d.definition?.name?.replace(/^@/, "") ?? "?";
+    if (VOCAB.has(name) && sectionRank(name) > 0 && !INLINE_OK.has(name)) continue; // flagged as augment-required
+    const loc = getSourceLocation(d.node);
+    if (!loc) continue;
+    const line = loc.file.getLineAndCharacterOfPosition(loc.pos).line;
+    if (seen.has(line)) {
+      problems.push(problem(loc, `@${name} on model ${model.name} takes its own line`));
+      return; // one violation per model
+    }
+    seen.add(line);
   }
 }
 

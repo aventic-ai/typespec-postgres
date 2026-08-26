@@ -79,7 +79,7 @@ describe("section ordering lint", () => {
 
   test("view_security_flags_inline_ok", async () => {
     const violations = await lintSpec({
-      "kbyg/views.tsp": `namespace \`public\`;\n@security_invoker @view model v { id: uuid; }\n\n@@grant(v, "authenticated", "select");\n`,
+      "kbyg/views.tsp": `namespace \`public\`;\n@security_invoker\n@view\nmodel v { id: uuid; }\n\n@@grant(v, "authenticated", "select");\n`,
     });
     expect(violations).toEqual([]);
   });
@@ -90,5 +90,30 @@ describe("section ordering lint", () => {
     });
     expect(violations.length).toBe(1);
     expect(violations[0].message).toContain("data");
+  });
+});
+
+describe("model decorator formatting", () => {
+  test("decorator_on_model_line_flags", async () => {
+    const violations = await lintSpec({
+      "identity/one.tsp": `namespace \`public\`;\n@pk("id") model one { id: uuid; }\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("own line");
+  });
+
+  test("decorators_sharing_a_line_flags", async () => {
+    const violations = await lintSpec({
+      "identity/two.tsp": `namespace \`public\`;\n@pk("id") @constraint("two_ck", "CHECK (true)")\nmodel two { id: uuid; }\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("own line");
+  });
+
+  test("stacked_own_line_decorators_clean", async () => {
+    const violations = await lintSpec({
+      "identity/three.tsp": `namespace \`public\`;\n@pk("id")\n@constraint("three_ck", "CHECK (true)")\nmodel three { id: uuid; }\n`,
+    });
+    expect(violations).toEqual([]);
   });
 });
