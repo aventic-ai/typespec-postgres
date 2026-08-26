@@ -1,11 +1,19 @@
 // IR differ: two catalogs in, list of problems out. Closed-world: an object
-// present on either side but not the other is drift.
+// present on either side but not the other is drift — in BOTH layers; the
+// layer tag decides disposition (gate vs mirror), never detection.
+// Impl facts are enumerated; everything else fails closed to contract, so a
+// facet added later gates by default (same rule as lib/layers.mjs).
+const IMPL_KIND = (kind) => kind === "trigger" || kind === "cron" || kind.startsWith("index ");
+const IMPL_FACET = new Set(["table:partitioned", "table:partition key", "function:body", "view:definition"]);
+const layerOf = (kind, name) =>
+  IMPL_KIND(kind) || IMPL_FACET.has(`${kind}:${name}`) ? "impl" : "contract";
+
 function diffMaps(kind, spec, live, problems, compare) {
   const keys = [...new Set([...Object.keys(spec ?? {}), ...Object.keys(live ?? {})])].sort();
   for (const k of keys) {
     const s = spec?.[k], l = live?.[k];
-    if (s === undefined) problems.push({ kind, key: k, what: "missing in spec (exists in database)" });
-    else if (l === undefined) problems.push({ kind, key: k, what: "missing in database (spec expects it)" });
+    if (s === undefined) problems.push({ layer: layerOf(kind), kind, key: k, what: "missing in spec (exists in database)" });
+    else if (l === undefined) problems.push({ layer: layerOf(kind), kind, key: k, what: "missing in database (spec expects it)" });
     else compare(k, s, l);
   }
 }
@@ -15,7 +23,7 @@ const jstr = (v) => JSON.stringify(v);
 export function diff(spec, live) {
   const problems = [];
   const facet = (kind, key, name, s, l) => {
-    if (jstr(s) !== jstr(l)) problems.push({ kind, key, what: `${name} differs`, spec: s, live: l });
+    if (jstr(s) !== jstr(l)) problems.push({ layer: layerOf(kind, name), kind, key, what: `${name} differs`, spec: s, live: l });
   };
 
   diffMaps("enum", spec.enums, live.enums, problems, (k, s, l) => facet("enum", k, "labels", s, l));
@@ -40,8 +48,8 @@ export function diff(spec, live) {
   diffMaps("function", spec.functions, live.functions, problems, (k, s, l) => {
     for (const f of ["args", "returns", "language", "volatility", "strict", "security_definer",
                      "config", "public_execute", "grants"]) facet("function", k, f, s[f], l[f]);
-    if (s.body !== l.body) problems.push({ kind: "function", key: k, what: "body differs",
-      spec: s.body.slice(0, 200), live: l.body.slice(0, 200) });
+    if (s.body !== l.body) problems.push({ layer: layerOf("function", "body"), kind: "function", key: k,
+      what: "body differs", spec: s.body.slice(0, 200), live: l.body.slice(0, 200) });
   });
   diffMaps("view", spec.views, live.views, problems, (k, s, l) => {
     facet("view", k, "definition", s.def, l.def);
@@ -59,12 +67,21 @@ export function diff(spec, live) {
 
 export function report(problems) {
   if (!problems.length) return "spec/db matches the database. 0 differences.";
-  const lines = [`${problems.length} difference(s):`];
+  const contract = problems.filter((p) => p.layer === "contract");
+  const impl = problems.filter((p) => p.layer === "impl");
+  const lines = [`${problems.length} difference(s): ${contract.length} contract (gate), ${impl.length} impl (mirror)`];
+  section(lines, "contract drift (gate):", contract);
+  section(lines, "impl drift (mirror):", impl);
+  return lines.join("\n");
+}
+
+function section(lines, title, problems) {
+  if (!problems.length) return;
+  lines.push(title);
   for (const p of problems.slice(0, 80)) {
     lines.push(`  ${p.kind} ${p.key}: ${p.what}`);
     if (p.spec !== undefined) lines.push(`      spec: ${jstr(p.spec)?.slice(0, 220)}`);
     if (p.live !== undefined) lines.push(`      live: ${jstr(p.live)?.slice(0, 220)}`);
   }
   if (problems.length > 80) lines.push(`  ... and ${problems.length - 80} more`);
-  return lines.join("\n");
 }

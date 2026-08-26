@@ -32,7 +32,8 @@ try {
     JSON.stringify(problems, null, 1),
   );
   console.log(report(problems));
-  process.exitCode = problems.length ? 1 : 0;
+  // 0 clean · 1 contract drift (gate) · 2 impl drift only (mirror)
+  process.exitCode = problems.some((p) => p.layer === "contract") ? 1 : problems.length ? 2 : 0;
 } finally {
   if (!keep) sql("postgres", `DROP DATABASE IF EXISTS ${SHADOW}`);
   else console.error(`shadow kept: ${SHADOW}`);
