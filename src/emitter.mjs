@@ -52,6 +52,7 @@ export async function emit(mainTsp) {
     triggers: [], rls: [], policies: [], grants: [], views: [] };
   const sequences = new Set();
   const cron = {};
+  const projections = {};   // view name -> declared [[column, pgType], ...]
   const opPgName = new Map();   // Operation type -> pg function name
 
   // enums
@@ -129,6 +130,7 @@ export async function emit(mainTsp) {
       const loc = getSourceLocation(model);
       const body = readFileSync(join(dirname(loc.file.path), st.view.body ?? `./views/${model.name}.sql`), "utf8").trim();
       viewDefs.push({ name: model.name, body, invoker: !!st.security_invoker, grants: st.grants ?? [] });
+      projections[model.name] = [...model.properties.values()].map((p) => [p.name, pgType(p.type, propState(p))]);
       continue;
     }
 
@@ -233,5 +235,5 @@ export async function emit(mainTsp) {
     ...out.types, ...out.sequences, ...out.tables, ...out.functions, ...out.alters, ...out.fks, ...out.indexes,
     ...out.triggers, ...out.rls, ...out.policies, ...out.grants, ...out.views,
   ].join("\n\n");
-  return { ddl, cron };
+  return { ddl, cron, projections };
 }

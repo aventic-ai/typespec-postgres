@@ -65,6 +65,21 @@ export function diff(spec, live) {
   return problems;
 }
 
+/** The spec disagreeing with itself: each declared view projection vs the
+ *  projection the view's own SQL produced in the shadow. Contract severity —
+ *  a declared fact may not be decorative. */
+export function projectionProblems(declared, shadowViews) {
+  const problems = [];
+  for (const [name, cols] of Object.entries(declared)) {
+    const produced = shadowViews?.[name]?.columns ?? null;
+    if (jstr(cols) !== jstr(produced)) {
+      problems.push({ layer: "contract", kind: "view", key: name,
+        what: "declared projection differs from its definition", spec: cols, live: produced });
+    }
+  }
+  return problems;
+}
+
 export function report(problems) {
   if (!problems.length) return "spec/db matches the database. 0 differences.";
   const contract = problems.filter((p) => p.layer === "contract");
