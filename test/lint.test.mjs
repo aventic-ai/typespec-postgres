@@ -1,6 +1,10 @@
 import { describe, test, expect } from "bun:test";
 import { lintSpec } from "./harness.mjs";
-import { decoratorLayer, sectionRank } from "../lib/layers.mjs";
+import {
+  decoratorLayer, sectionRank, factRank,
+  FACT_ORDER, IMPL_DECORATORS, SECURITY_DECORATORS,
+} from "../lib/layers.mjs";
+import { $decorators } from "../lib/index.js";
 
 const USERS = `namespace \`public\`;
 @pk("id")
@@ -130,5 +134,124 @@ describe("model decorator formatting", () => {
       "identity/five.tsp": `namespace \`public\`;\nmodel a { id: uuid; }\nmodel b {\n  @references(a.id)\n  a_id: uuid;\n}\n`,
     });
     expect(violations).toEqual([]);
+  });
+});
+
+describe("decorator order on a declaration", () => {
+  // The order is only predictable if it is total: a decorator that can be
+  // written on a declaration and has no position would silently escape it.
+  test("fact_order_covers_every_declaration_decorator", () => {
+    const inlineOk = new Set(["security_invoker", "security_definer", "schedule", "command"]);
+    const inline = Object.keys($decorators[""]).filter(
+      (n) => inlineOk.has(n) || (!IMPL_DECORATORS.has(n) && !SECURITY_DECORATORS.has(n)),
+    );
+    expect(inline.filter((n) => factRank(n) === null)).toEqual([]);
+    expect(FACT_ORDER.filter((n) => !inline.includes(n))).toEqual([]);
+    expect(new Set(FACT_ORDER).size).toBe(FACT_ORDER.length);
+  });
+
+  test("canonical_table_header_clean", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;
+@pk("id")
+@check("(a > 0)")
+@check("(a < 9)")
+@constraint("e_uq", "UNIQUE (a)")
+@constraint("e_fk", "FOREIGN KEY (a) REFERENCES t(a)")
+model e {
+  id: uuid;
+  a: integer;
+}
+model t {
+  a: integer;
+}
+`,
+    });
+    expect(violations).toEqual([]);
+  });
+
+  test("check_before_pk_flags", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\n@check("(a > 0)")\n@pk("id")\nmodel e {\n  id: uuid;\n  a: integer;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@pk on model e belongs above @check");
+  });
+
+  test("constraint_before_check_flags", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\n@pk("id")\n@constraint("e_uq", "UNIQUE (a)")\n@check("(a > 0)")\nmodel e {\n  id: uuid;\n  a: integer;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@check on model e belongs above @constraint");
+  });
+
+  test("repeated_decorators_keep_author_order", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\n@check("(z > 0)")\n@check("(a > 0)")\nmodel e {\n  a: integer;\n  z: integer;\n}\n`,
+    });
+    expect(violations).toEqual([]);
+  });
+
+  test("foreign_decorator_between_facts_is_exempt", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\n@pk("id")\n@doc("still in order")\n@check("(a > 0)")\nmodel e {\n  id: uuid;\n  a: integer;\n}\n`,
+    });
+    expect(violations).toEqual([]);
+  });
+
+  test("view_flag_before_view_clean_and_reverse_flags", async () => {
+    const clean = await lintSpec({
+      "kbyg/v.tsp": `namespace \`public\`;\n@security_invoker\n@view\nmodel v { id: uuid; }\n`,
+    });
+    expect(clean).toEqual([]);
+    const violations = await lintSpec({
+      "kbyg/v.tsp": `namespace \`public\`;\n@view\n@security_invoker\nmodel v { id: uuid; }\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@security_invoker on model v belongs above @view");
+  });
+
+  test("pg_name_before_function_clean_and_reverse_flags", async () => {
+    const clean = await lintSpec({
+      "platform/f.tsp": `namespace \`public\`;\n@pg_name("f")\n@function("sql stable")\nop f__overload2(): text;\n`,
+    });
+    expect(clean).toEqual([]);
+    const violations = await lintSpec({
+      "platform/f.tsp": `namespace \`public\`;\n@function("sql stable")\n@pg_name("f")\nop f__overload2(): text;\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@pg_name on op f__overload2 belongs above @function");
+  });
+
+  test("cron_command_before_schedule_flags", async () => {
+    const violations = await lintSpec({
+      "identity/cron.tsp": `namespace cron;\n@command("select 1")\n@schedule("17 3 * * *")\nop nightly(): void;\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@schedule on op nightly belongs above @command");
+  });
+
+  test("property_fact_order_flags", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\nmodel t {\n  a: integer;\n}\nmodel e {\n  @check("(a > 0)")\n  @references(t.a)\n  a: integer;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@references on e.a belongs above @check");
+  });
+
+  test("misordered_decorators_flag_once_per_model", async () => {
+    const violations = await lintSpec({
+      "events/e.tsp": `namespace \`public\`;\n@check("(a > 0)")\n@pk("id")\nmodel e {\n  id: uuid;\n  @check("(a > 0)")\n  @pg_type("int4")\n  a: integer;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+  });
+
+  test("augment_required_decorator_is_not_also_misordered", async () => {
+    const violations = await lintSpec({
+      "identity/u.tsp": `namespace \`public\`;\n@rls\n@pk("id")\nmodel u { id: uuid; }\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("augment");
   });
 });

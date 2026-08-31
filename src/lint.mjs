@@ -6,12 +6,15 @@
 // because the whole op is impl, and view security flags stay inline on
 // their headers because the dangerous kind announces itself), and within
 // any file no statement's section may precede one of a higher rank already
-// seen. A pure single-section file satisfies the ordering vacuously.
-// Foreign decorators (@doc, …) are exempt: the vocabulary is exactly what
-// lib/index.js implements.
+// seen. A pure single-section file satisfies the ordering vacuously. Two
+// formatting rules sit one altitude down, on the individual declaration:
+// every inline decorator takes its own line, and a declaration's facts read
+// in the canonical decorator order (lib/layers.mjs FACT_ORDER). Foreign
+// decorators (@doc, …) are exempt from the section and order rules: the
+// vocabulary is exactly what lib/index.js implements.
 import { getSourceLocation } from "@typespec/compiler";
 import { $decorators } from "../lib/index.js";
-import { sectionRank } from "../lib/layers.mjs";
+import { sectionRank, factRank } from "../lib/layers.mjs";
 
 const VOCAB = new Set(Object.keys($decorators[""]));
 const SECTION = ["data", "security", "impl"];
@@ -39,6 +42,7 @@ function collectNamespace(ns, nsName, files, problems) {
     declaration(model, `model ${model.name}`, 0, files);
     applications(model, files, problems);
     ownLineProblem(model, problems);
+    factOrderProblem(model, problems);
     for (const [, prop] of model.properties) applications(prop, files, problems);
   }
   for (const [, op] of ns.operations) {
@@ -47,6 +51,7 @@ function collectNamespace(ns, nsName, files, problems) {
     const rank = nsName === "cron" ? 2 : 0;
     declaration(op, `op ${op.name}`, rank, files);
     applications(op, files, problems, rank);
+    factOrderViolation(op, `op ${op.name}`, problems, rank);
     for (const [, param] of op.parameters.properties) applications(param, files, problems, rank);
   }
   for (const [, en] of ns.enums) {
@@ -70,7 +75,7 @@ function applications(type, files, problems, declRank = 0) {
     // augment statements carry targetType (the augmented reference); inline
     // decorator expressions do not — structural, SyntaxKind isn't exported
     const augment = !!d.node && "targetType" in d.node;
-    if (rank > 0 && !augment && declRank !== 2 && !INLINE_OK.has(name)) {
+    if (!augment && augmentRequired(name, declRank)) {
       problems.push(problem(loc, `${SECTION[rank]}-section @${name} must be an augment statement (@@${name}) in its section`));
       continue;
     }
@@ -101,7 +106,7 @@ function ownLineViolation(type, label, problems) {
   for (const d of type.decorators ?? []) {
     if (!!d.node && "targetType" in d.node) continue; // augments live in sections
     const name = d.definition?.name?.replace(/^@/, "") ?? "?";
-    if (VOCAB.has(name) && sectionRank(name) > 0 && !INLINE_OK.has(name)) continue; // flagged as augment-required
+    if (VOCAB.has(name) && augmentRequired(name, 0)) continue; // flagged as augment-required
     const loc = getSourceLocation(d.node);
     if (!loc) continue;
     const line = loc.file.getLineAndCharacterOfPosition(loc.pos).line;
@@ -110,6 +115,52 @@ function ownLineViolation(type, label, problems) {
       return true;
     }
     seen.add(line);
+  }
+  return false;
+}
+
+// A security- or impl-rank decorator belongs in its section as an augment,
+// with the two ratified inline exceptions and the cron op whose every fact
+// is impl. Shared by the augment rule and the decorator-order rule, so an
+// already-flagged decorator is never also reported as misordered.
+const augmentRequired = (name, declRank) =>
+  sectionRank(name) > 0 && declRank !== 2 && !INLINE_OK.has(name);
+
+// A declaration's facts read in the canonical decorator order — kind and
+// identity, shape, invariants, then verbatim DDL (lib/layers.mjs FACT_ORDER).
+// Same granularity as the own-line rule: one violation per model, header and
+// properties together.
+function factOrderProblem(model, problems) {
+  if (factOrderViolation(model, `model ${model.name}`, problems)) return;
+  for (const [, prop] of model.properties) {
+    if (factOrderViolation(prop, `${model.name}.${prop.name}`, problems)) return;
+  }
+}
+
+function factOrderViolation(type, label, problems, declRank = 0) {
+  const facts = [];
+  for (const d of type.decorators ?? []) {
+    if (!!d.node && "targetType" in d.node) continue; // augments are statements
+    const name = d.definition?.name?.replace(/^@/, "");
+    if (!name || !VOCAB.has(name) || augmentRequired(name, declRank)) continue;
+    const rank = factRank(name);
+    if (rank === null) continue;
+    const loc = getSourceLocation(d.node);
+    if (!loc || isLibrary(loc.file.path)) continue;
+    facts.push({ pos: loc.pos, loc, rank, name });
+  }
+  // decorators arrive in application order — bottom-up, the reverse of how
+  // they are written — so source position is the only reading order
+  facts.sort((a, b) => a.pos - b.pos);
+  let highest = null;
+  for (const it of facts) {
+    if (!highest || it.rank >= highest.rank) {
+      if (!highest || it.rank > highest.rank) highest = it;
+      continue;
+    }
+    problems.push(problem(it.loc,
+      `@${it.name} on ${label} belongs above @${highest.name} — a declaration's facts read kind, shape, invariants, then verbatim DDL`));
+    return true;
   }
   return false;
 }
