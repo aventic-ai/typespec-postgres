@@ -17,12 +17,13 @@ const keep = args.includes("--keep");
 const specMain = args.find((a) => !a.startsWith("--")) ?? "spec/db/main.tsp";
 const debugDir = process.env.SPEC_DEBUG_DIR;
 
-console.error("reading live catalog ...");
-const live = readCatalog(liveDb(), { cron: true });
-
+// the spec says which schemas are its own, so it compiles before either catalog is read
 console.error("compiling spec + emitting DDL ...");
-const { ddl, cron, projections } = await emit(specMain);
+const { ddl, cron, projections, schemas } = await emit(specMain);
 if (debugDir) writeFileSync(join(debugDir, "emitted.sql"), ddl);
+
+console.error(`reading live catalog (${schemas.join(", ")}) ...`);
+const live = readCatalog(liveDb(), { cron: true, schemas });
 
 console.error("building shadow ...");
 sql("postgres", `DROP DATABASE IF EXISTS ${SHADOW}`);
@@ -31,7 +32,7 @@ try {
   script(SHADOW, prelude(SHADOW));
   script(SHADOW, ddl);
   console.error("reading shadow catalog ...");
-  const shadow = readCatalog(SHADOW, { cron: false });
+  const shadow = readCatalog(SHADOW, { cron: false, schemas });
   // declared must equal produced before drift against live is meaningful
   const self = projectionProblems(projections, shadow.views);
   if (self.length) {

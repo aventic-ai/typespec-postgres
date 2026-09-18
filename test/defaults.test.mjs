@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { emit } from "../src/emitter.mjs";
 const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
 
 async function ddlOf(body) {
-  const dir = mkdtempSync(join(tmpdir(), "pgspec-def-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-def-")));
   mkdirSync(join(dir, "fn"));
   writeFileSync(join(dir, "fn", "f.sql"), "select 'x'\n");
   const lib = relative(dir, LIB).replaceAll("\\", "/");
