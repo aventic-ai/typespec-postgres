@@ -4,9 +4,8 @@
 // server's own pg_get_* functions, so both sides carry the same
 // normalization and string equality is semantic equality.
 import { rows } from "./db.mjs";
-import { catalogKeySql, schemaArraySql } from "./schemas.mjs";
+import { MANAGED_ROLES, catalogKeySql, schemaArraySql } from "./schemas.mjs";
 
-const MANAGED_ROLES = ["anon", "authenticated", "service_role"];
 const EXTERNAL_POLICY_TABLES = ["storage.objects", "realtime.messages"];
 
 /** One database's catalog as IR. `schemas` are the ones the spec declares. */
@@ -17,17 +16,19 @@ export function readCatalog(db, { cron = false, schemas = ["public"] } = {}) {
 
   // `public` belongs to the platform, which grants on it as it sees fit. Any
   // other schema is the spec's: the shadow grants nothing on it, so a
-  // PostgREST role holding a privilege on the live one is drift.
+  // PostgREST role that can use the live one is drift. What counts is what the
+  // role can do, not who was granted: a grant to PUBLIC, or to a role it
+  // inherits from, lets it in without ever naming it.
   ir.schemas = Object.fromEntries(
     rows(db, `
       SELECT n.nspname AS name,
-             (SELECT json_agg(a.grantee::regrole::text || ':' || a.privilege_type
-                              ORDER BY a.grantee::regrole::text, a.privilege_type)
-                FROM aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
-               WHERE a.grantee::regrole::text = ANY('{${MANAGED_ROLES.join(",")}}')) AS grants
+             (SELECT json_agg(r.rolname || ':' || p.privilege ORDER BY r.rolname, p.privilege)
+                FROM pg_roles r, (VALUES ('CREATE'), ('USAGE')) p(privilege)
+               WHERE r.rolname = ANY('{${MANAGED_ROLES.join(",")}}')
+                 AND has_schema_privilege(r.oid, n.oid, p.privilege)) AS privileges
       FROM pg_namespace n
       WHERE n.nspname = ANY(${declared}) AND n.nspname <> 'public' ORDER BY 1
-    `).map((r) => [r.name, { grants: r.grants ?? [] }]),
+    `).map((r) => [r.name, { privileges: r.privileges ?? [] }]),
   );
 
   ir.enums = Object.fromEntries(

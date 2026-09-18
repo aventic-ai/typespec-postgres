@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { modelState, opState, propState } from "../lib/index.js";
 import { lintLayers } from "./lint.mjs";
-import { catalogKey, declaredSchemas } from "./schemas.mjs";
+import { IDENTIFIER, MANAGED_ROLES, PLAIN_IDENTIFIER, catalogKey, declaredSchemas } from "./schemas.mjs";
 
 const SCALAR_TO_PG = {
   text_s: "text", uuid_s: "uuid", timestamptz_s: "timestamp with time zone",
@@ -33,14 +33,37 @@ function pgType(type, st = {}) {
   throw new Error(`unmapped type kind ${type.kind}/${type.name}`);
 }
 
-const q = (name) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`);
+const q = (name) => (PLAIN_IDENTIFIER.test(name) ? name : `"${name.replaceAll('"', '""')}"`);
 const rel = (schema, name) => `${q(schema)}.${q(name)}`;
 
-// A type reads bare inside `public`, which the shadow and the live database
-// both search, and qualified anywhere else, where neither does.
-function typeRef(type) {
-  const schema = type.namespace?.name;
-  return !schema || schema === "public" ? type.name : rel(schema, type.name);
+// The schema a declaration lives in is its namespace, whether or not the spec
+// owns it: a table another system owns is still referenced where it is. The
+// one exception is pg_cron's job list, whose functions land in `public`.
+function schemaOf(type) {
+  const name = type.namespace?.name;
+  return !name || name === "cron" ? "public" : name;
+}
+const qualified = (type, name = type.name) => rel(schemaOf(type), name);
+
+// A type reads bare inside `public`, which every session searches, and
+// qualified anywhere else, which none does.
+const typeRef = (type) => (schemaOf(type) === "public" ? type.name : qualified(type));
+
+// A serial-style default, with the schema it names when it names one.
+const NEXTVAL = new RegExp(`nextval\\('(?:(${IDENTIFIER})\\.)?([^':.]+)'`);
+
+// The check reads a PostgREST role's reach into a schema beside `public` as
+// drift, so a grant to one inside it could never be used. Refuse it rather
+// than emit a privilege that only looks like access.
+function assertGrantable(type, name, grants) {
+  const schema = schemaOf(type);
+  if (schema === "public") return;
+  const dead = grants.find((g) => MANAGED_ROLES.includes(g.role));
+  if (!dead) return;
+  throw new Error(
+    `${dead.role} cannot be granted anything on ${rel(schema, name)}: schema ${schema} is closed to the ` +
+    `PostgREST roles, and USAGE on it is drift`,
+  );
 }
 
 function litToSql(v) {
@@ -79,9 +102,6 @@ export async function emit(mainTsp) {
   const glob = program.getGlobalNamespaceType();
   const schemas = declaredSchemas(glob);
   const namespaces = schemas.map((name) => glob.namespaces.get(name));
-  // A declaration outside every schema (a cron op carrying @function) lands in `public`.
-  const schemaOf = (type) => (schemas.includes(type.namespace?.name) ? type.namespace.name : "public");
-  const qualified = (type, name = type.name) => rel(schemaOf(type), name);
 
   // alters: non-FK constraints (unique/check) must all land before any FK,
   // since FKs may target uniques on other tables.
@@ -91,6 +111,19 @@ export async function emit(mainTsp) {
   const cron = {};
   const projections = {};   // view catalog key -> declared [[column, pgType], ...]
   const opPgName = new Map();   // Operation type -> pg function name
+
+  // Two declarations that leave their body to the default path and share a
+  // name and a directory would read one file, the second taking the first's SQL.
+  const defaultBodies = new Map();   // file -> the declaration that reads it
+  const readBody = (type, explicit, byDefault, owner) => {
+    const file = join(dirname(getSourceLocation(type).file.path), explicit ?? byDefault);
+    if (!explicit) {
+      const other = defaultBodies.get(file);
+      if (other) throw new Error(`${other} and ${owner} both read ${byDefault}: name a body file on one of them`);
+      defaultBodies.set(file, owner);
+    }
+    return readFileSync(file, "utf8");
+  };
 
   // `public` exists in every database; any other schema the spec declares is its to create
   out.schemas.push(...schemas.filter((name) => name !== "public").map((name) => `CREATE SCHEMA ${q(name)};`));
@@ -111,6 +144,7 @@ export async function emit(mainTsp) {
   for (const op of opsEverywhere) {
     const st = opState(op);
     if (st.schedule || st.command) {
+      if (cron[op.name]) throw new Error(`two ops named ${op.name} carry a schedule: a name is one job in pg_cron`);
       cron[op.name] = { schedule: st.schedule, command: st.command };
       continue;
     }
@@ -145,8 +179,7 @@ export async function emit(mainTsp) {
     const words = st.fn.options.split(/\s+/);
     const language = words[0];
     const rest = st.fn.options.slice(language.length).trim();
-    const loc = getSourceLocation(op);
-    const body = readFileSync(join(dirname(loc.file.path), st.fn.body ?? `./fn/${op.name}.sql`), "utf8").trimEnd();
+    const body = readBody(op, st.fn.body, `./fn/${op.name}.sql`, qualified(op, pgName)).trimEnd();
     let tag = "$function$";
     while (body.includes(tag)) tag = tag.replace("$", "$x");
     out.functions.push(
@@ -155,7 +188,8 @@ export async function emit(mainTsp) {
     );
     const sig = `${qualified(op, pgName)}(${params.map((p) => p.split(" DEFAULT ")[0]).join(", ")})`;
     out.grants.push(`REVOKE ALL ON FUNCTION ${sig} FROM PUBLIC;`);
-    for (const g of opState(op).grants ?? []) {
+    assertGrantable(op, pgName, st.grants ?? []);
+    for (const g of st.grants ?? []) {
       out.grants.push(`GRANT EXECUTE ON FUNCTION ${sig} TO ${g.role === "public" ? "PUBLIC" : q(g.role)};`);
     }
   }
@@ -166,9 +200,9 @@ export async function emit(mainTsp) {
     const st = modelState(model);
     if (st.external) continue;
     const table = qualified(model);
+    assertGrantable(model, model.name, st.grants ?? []);
     if (st.view) {
-      const loc = getSourceLocation(model);
-      const body = readFileSync(join(dirname(loc.file.path), st.view.body ?? `./views/${model.name}.sql`), "utf8").trim();
+      const body = readBody(model, st.view.body, `./views/${model.name}.sql`, table).trim();
       viewDefs.push({ name: model.name, rel: table, body, invoker: !!st.security_invoker, grants: st.grants ?? [] });
       projections[catalogKey(schemaOf(model), model.name)] =
         [...model.properties.values()].map((p) => [p.name, pgType(p.type, propState(p))]);
@@ -187,7 +221,7 @@ export async function emit(mainTsp) {
         c += ` DEFAULT ${def}`;
         // serial-style defaults imply their sequence; create it first, in the
         // schema the default names — unqualified, that is `public`
-        const seq = def.match(/nextval\('(?:([a-z_][a-z0-9_]*)\.)?([^':.]+)'/);
+        const seq = def.match(NEXTVAL);
         if (seq) sequences.add(rel(seq[1] ?? "public", seq[2]));
       }
       if (!p.optional && !ps.generated) c += " NOT NULL";
@@ -254,15 +288,19 @@ export async function emit(mainTsp) {
   }
 
   // views: dependency-ordered (a view referencing another view comes later).
-  // Placement tracks the view, not its name: two schemas may share one.
+  // A dependency is any other view the body names. Matching on the name alone
+  // can make a view wait needlessly for a same-named one in another schema;
+  // skipping same-named views instead emits one before the view it selects from.
+  const deps = new Map(viewDefs.map((v) => [
+    v, viewDefs.filter((d) => d !== v && new RegExp(`\\b${d.name}\\b`).test(v.body)),
+  ]));
   const ordered = [];
   const placed = new Set();
   let guard = viewDefs.length + 1;
   while (ordered.length < viewDefs.length && guard--) {
     for (const v of viewDefs) {
       if (placed.has(v)) continue;
-      const deps = viewDefs.filter((d) => d.name !== v.name && new RegExp(`\\b${d.name}\\b`).test(v.body));
-      if (deps.every((d) => placed.has(d))) { ordered.push(v); placed.add(v); }
+      if (deps.get(v).every((d) => placed.has(d))) { ordered.push(v); placed.add(v); }
     }
   }
   for (const v of viewDefs.filter((v) => !placed.has(v))) ordered.push(v);   // cycles: let PG error

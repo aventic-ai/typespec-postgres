@@ -68,9 +68,9 @@ namespace chat {
 
 // ── security ──────────────────────────────────────────
 @@rls(chat.rooms);
-@@grant(chat.rooms, "service_role", "select");
-@@grant(chat.open_rooms, "service_role", "select");
-@@grant(chat.room_count, "service_role", "execute");
+@@grant(chat.rooms, "gx_api", "select");
+@@grant(chat.open_rooms, "gx_api", "select");
+@@grant(chat.room_count, "gx_api", "execute");
 @@policy(chat.rooms, "members read", "for select to authenticated using (true)");
 
 // ── impl ──────────────────────────────────────────────
@@ -100,7 +100,7 @@ describe("a namespace beside public is a schema of its own", () => {
   test("a_table_and_its_facts_carry_the_schema", () => {
     expect(out.ddl).toContain("CREATE TABLE chat.rooms (");
     expect(out.ddl).toContain("ALTER TABLE chat.rooms ENABLE ROW LEVEL SECURITY;");
-    expect(out.ddl).toContain("GRANT select ON chat.rooms TO service_role;");
+    expect(out.ddl).toContain("GRANT select ON chat.rooms TO gx_api;");
     expect(out.ddl).toContain('CREATE POLICY "members read" ON chat.rooms\n');
     expect(out.ddl).toContain("CREATE INDEX rooms_org_idx ON chat.rooms USING btree (org_id);");
   });
@@ -115,7 +115,7 @@ describe("a namespace beside public is a schema of its own", () => {
   test("a_function_is_created_revoked_and_granted_in_its_schema", () => {
     expect(out.ddl).toContain("CREATE FUNCTION chat.room_count() RETURNS bigint\n");
     expect(out.ddl).toContain("REVOKE ALL ON FUNCTION chat.room_count() FROM PUBLIC;");
-    expect(out.ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO service_role;");
+    expect(out.ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO gx_api;");
   });
 
   test("a_trigger_names_the_schema_its_function_lives_in", () => {
@@ -132,7 +132,7 @@ describe("a namespace beside public is a schema of its own", () => {
 
   test("a_view_and_its_projection_carry_the_schema", () => {
     expect(out.ddl).toContain("CREATE VIEW chat.open_rooms WITH (security_invoker=true) AS\n");
-    expect(out.ddl).toContain("GRANT select ON chat.open_rooms TO service_role;");
+    expect(out.ddl).toContain("GRANT select ON chat.open_rooms TO gx_api;");
     expect(out.projections).toEqual({ "chat.open_rooms": [["id", "uuid"]] });
   });
 
@@ -154,15 +154,74 @@ describe("public stays what it was", () => {
     expect(schemas).toEqual(["public"]);
     expect(ddl).not.toContain("CREATE SCHEMA");
   });
+});
 
-  test("same_named_views_in_two_schemas_both_emit", async () => {
-    const view = "@security_invoker\n  @view\n  model v { id: uuid; }";
-    const { ddl } = await emit(specDir(
-      `namespace \`public\` {\n  model probes { id: uuid; }\n  ${view}\n}\n` +
-      `namespace chat {\n  using \`public\`;\n  ${view}\n}\n`,
-      { "views/v.sql": "select id from public.probes\n" },
-    ));
+const sameNamedViews = (publicBody, chatBody) => specDir(
+  `namespace \`public\` {\n  model probes { id: uuid; }\n  @security_invoker\n  @view("./views/public_v.sql")\n  model v { id: uuid; }\n}\n` +
+  `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n  @security_invoker\n  @view("./views/chat_v.sql")\n  model v { id: uuid; }\n}\n`,
+  { "views/public_v.sql": publicBody, "views/chat_v.sql": chatBody },
+);
+
+describe("views that share a name across schemas", () => {
+  test("both_emit", async () => {
+    const { ddl } = await emit(sameNamedViews("select id from probes\n", "select id from chat.rooms\n"));
     expect(ddl).toContain("CREATE VIEW public.v ");
     expect(ddl).toContain("CREATE VIEW chat.v ");
+  });
+
+  test("one_waits_for_the_other_it_selects_from", async () => {
+    const { ddl } = await emit(sameNamedViews("select id from chat.v\n", "select id from chat.rooms\n"));
+    expect(ddl.indexOf("CREATE VIEW chat.v ")).toBeLessThan(ddl.indexOf("CREATE VIEW public.v "));
+  });
+
+  test("two_declarations_cannot_read_one_default_body_file", async () => {
+    const view = "@security_invoker\n  @view\n  model v { id: uuid; }";
+    const main = specDir(
+      `namespace \`public\` {\n  model probes { id: uuid; }\n  ${view}\n}\n` +
+      `namespace chat {\n  using \`public\`;\n  ${view}\n}\n`,
+      { "views/v.sql": "select id from probes\n" },
+    );
+    expect(emit(main)).rejects.toThrow(/public\.v.*chat\.v.*views\/v\.sql/s);
+  });
+});
+
+describe("a schema beside public is closed to the PostgREST roles", () => {
+  const granting = (declaration, target) => specDir(
+    `namespace \`public\` {\n  model probes { id: uuid; }\n}\n` +
+    `namespace chat {\n  using \`public\`;\n  ${declaration}\n}\n` +
+    `@@grant(chat.${target}, "service_role", "select");\n`,
+    { "fn/room_count.sql": "select 1\n", "views/open_rooms.sql": "select 1 as id\n" },
+  );
+
+  test.each([
+    ["a table", "model rooms { id: uuid; }", "rooms"],
+    ["a view", "@security_invoker\n  @view\n  model open_rooms { id: integer; }", "open_rooms"],
+    ["a function", '@function("sql stable") op room_count(): bigint;', "room_count"],
+  ])("a_grant_on_%s_there_is_refused", async (_kind, declaration, target) => {
+    expect(emit(granting(declaration, target))).rejects.toThrow(
+      new RegExp(`service_role.*chat\\.${target}.*USAGE`, "s"),
+    );
+  });
+});
+
+describe("declarations outside the spec's own schemas", () => {
+  test("a_foreign_key_to_another_systems_table_names_that_schema", async () => {
+    const { ddl } = await emit(specDir(
+      `namespace vault {\n  using \`public\`;\n  @external\n  model secrets { id: uuid; }\n}\n` +
+      `namespace \`public\` {\n  model probes {\n    id: uuid;\n    @references(vault.secrets.id)\n    secret_id: uuid;\n  }\n}\n`,
+    ));
+    expect(ddl).toContain("REFERENCES vault.secrets(id);");
+    expect(ddl).not.toContain("CREATE SCHEMA");
+  });
+
+  // Outside `cron` a job's schedule is an impl fact, so the lint wants it as an augment.
+  test("two_jobs_cannot_share_a_name", async () => {
+    const main = specDir(
+      `namespace \`public\` {\n  model probes { id: uuid; }\n}\n` +
+      `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n  op nightly(): void;\n}\n` +
+      `namespace cron {\n  @schedule("17 3 * * *")\n  @command("select 1")\n  op nightly(): void;\n}\n` +
+      `@@schedule(chat.nightly, "5 4 * * *");\n@@command(chat.nightly, "select 2");\n`,
+    );
+    expect(emit(main)).rejects.toThrow(/nightly.*one job/s);
   });
 });

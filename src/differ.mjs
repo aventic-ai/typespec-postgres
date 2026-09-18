@@ -26,7 +26,8 @@ export function diff(spec, live) {
     if (jstr(s) !== jstr(l)) problems.push({ layer: layerOf(kind, name), kind, key, what: `${name} differs`, spec: s, live: l });
   };
 
-  diffMaps("schema", spec.schemas, live.schemas, problems, (k, s, l) => facet("schema", k, "grants", s.grants, l.grants));
+  diffMaps("schema", spec.schemas, live.schemas, problems, (k, s, l) =>
+    facet("schema", k, "privileges", s.privileges, l.privileges));
 
   diffMaps("enum", spec.enums, live.enums, problems, (k, s, l) => facet("enum", k, "labels", s, l));
 

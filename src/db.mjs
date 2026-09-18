@@ -8,6 +8,18 @@ const host = () => process.env.SPEC_DB_HOST ?? "127.0.0.1";
 const port = () => process.env.SPEC_DB_PORT ?? "54322";
 const user = () => process.env.SPEC_DB_USER ?? "postgres";
 
+// pg_get_* and format_type print a name bare or qualified depending on the
+// session's search_path, and the two catalogs are compared as text. A role's
+// or a database's own setting would otherwise decide it, differently on each
+// side; a startup option outranks both.
+export const SEARCH_PATH = "public, extensions";
+
+const session = () => ({
+  ...process.env,
+  PGPASSWORD: password(),
+  PGOPTIONS: `${process.env.PGOPTIONS ?? ""} -c search_path=${SEARCH_PATH.replaceAll(" ", "")}`.trim(),
+});
+
 /** The live database the spec is checked against. */
 export const liveDb = () => process.env.SPEC_DB_NAME ?? "postgres";
 
@@ -21,7 +33,7 @@ export function sql(db, query, opts = {}) {
   return execFileSync(
     "psql",
     ["-h", host(), "-p", port(), "-U", user(), "-d", db, "-v", "ON_ERROR_STOP=1", "-tA", "-c", query],
-    { encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: { ...process.env, PGPASSWORD: password() }, ...opts },
+    { encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: session(), ...opts },
   );
 }
 
@@ -36,6 +48,6 @@ export function script(db, text) {
   return execFileSync(
     "psql",
     ["-h", host(), "-p", port(), "-U", user(), "-d", db, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
-    { encoding: "utf8", input: text, maxBuffer: 512 * 1024 * 1024, env: { ...process.env, PGPASSWORD: password() } },
+    { encoding: "utf8", input: text, maxBuffer: 512 * 1024 * 1024, env: session() },
   );
 }
