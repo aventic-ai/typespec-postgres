@@ -156,6 +156,23 @@ describe("differ layer tagging", () => {
   });
 });
 
+describe("schemas the spec declares", () => {
+  test("a_declared_schema_the_database_lacks_is_contract", () => {
+    const p = one(diff(ir({ schemas: { chat: { grants: [] } } }), ir({ schemas: {} })));
+    expect(p).toMatchObject({ layer: "contract", kind: "schema", key: "chat" });
+    expect(p.what).toContain("missing in database");
+  });
+
+  test("usage_the_spec_does_not_grant_is_contract", () => {
+    const p = one(diff(
+      ir({ schemas: { chat: { grants: [] } } }),
+      ir({ schemas: { chat: { grants: ["authenticated:USAGE"] } } }),
+    ));
+    expect(p).toMatchObject({ layer: "contract", kind: "schema", key: "chat", what: "grants differs" });
+    expect(p.live).toEqual(["authenticated:USAGE"]);
+  });
+});
+
 describe("severity report", () => {
   test("clean_reports_zero_differences", () => {
     expect(report([])).toContain("0 differences");

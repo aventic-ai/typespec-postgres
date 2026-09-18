@@ -43,6 +43,10 @@ scalar sql {
   init of(expr: string);
 }
 
+// The column types. A namespace other than `public` is a schema of its own
+// and reaches them with `using \`public\`;` INSIDE its namespace block: at
+// file level that using ties with the compiler's implicit one, and `boolean`,
+// `integer` and `numeric` turn ambiguous with its builtins.
 namespace `public` {
   scalar uuid_s extends string;
   alias uuid = uuid_s | sql;

@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { modelState, opState, propState } from "../lib/index.js";
 import { lintLayers } from "./lint.mjs";
+import { catalogKey, declaredSchemas } from "./schemas.mjs";
 
 const SCALAR_TO_PG = {
   text_s: "text", uuid_s: "uuid", timestamptz_s: "timestamp with time zone",
@@ -25,14 +26,22 @@ function pgType(type, st = {}) {
     return pgType(real, st);
   }
   if (type.kind === "Scalar") return SCALAR_TO_PG[type.name] ?? type.name;
-  if (type.kind === "Enum") return type.name;
+  if (type.kind === "Enum") return typeRef(type);
   if (type.kind === "Model" && type.name === "Array") return `${pgType(type.indexer.value)}[]`;
-  if (type.kind === "Model") return type.name;   // table/composite reference
+  if (type.kind === "Model") return typeRef(type);   // table/composite reference
   if (type.kind === "Intrinsic" && type.name === "void") return "void";
   throw new Error(`unmapped type kind ${type.kind}/${type.name}`);
 }
 
 const q = (name) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`);
+const rel = (schema, name) => `${q(schema)}.${q(name)}`;
+
+// A type reads bare inside `public`, which the shadow and the live database
+// both search, and qualified anywhere else, where neither does.
+function typeRef(type) {
+  const schema = type.namespace?.name;
+  return !schema || schema === "public" ? type.name : rel(schema, type.name);
+}
 
 function litToSql(v) {
   if (typeof v === "string") return `'${v.replaceAll("'", "''")}'`;
@@ -51,7 +60,7 @@ function valueToSql(dv) {
     case "BooleanValue": return String(dv.value);
     case "EnumValue": {
       const m = dv.value;
-      return `${litToSql(typeof m.value === "string" ? m.value : m.name)}::${m.enum.name}`;
+      return `${litToSql(typeof m.value === "string" ? m.value : m.name)}::${typeRef(m.enum)}`;
     }
   }
   throw new Error(`unsupported default value kind ${dv.valueKind}`);
@@ -68,28 +77,34 @@ export async function emit(mainTsp) {
     throw new Error(`spec does not lint:\n${layering.slice(0, 10).map((v) => `${v.file}:${v.line} ${v.message}`).join("\n")}`);
   }
   const glob = program.getGlobalNamespaceType();
-  const pub = glob.namespaces.get("public");
-  if (!pub) throw new Error("no `public` namespace in spec");
+  const schemas = declaredSchemas(glob);
+  const namespaces = schemas.map((name) => glob.namespaces.get(name));
+  // A declaration outside every schema (a cron op carrying @function) lands in `public`.
+  const schemaOf = (type) => (schemas.includes(type.namespace?.name) ? type.namespace.name : "public");
+  const qualified = (type, name = type.name) => rel(schemaOf(type), name);
 
   // alters: non-FK constraints (unique/check) must all land before any FK,
   // since FKs may target uniques on other tables.
-  const out = { types: [], sequences: [], tables: [], functions: [], alters: [], fks: [], indexes: [],
+  const out = { schemas: [], types: [], sequences: [], tables: [], functions: [], alters: [], fks: [], indexes: [],
     triggers: [], rls: [], policies: [], grants: [], views: [] };
   const sequences = new Set();
   const cron = {};
-  const projections = {};   // view name -> declared [[column, pgType], ...]
+  const projections = {};   // view catalog key -> declared [[column, pgType], ...]
   const opPgName = new Map();   // Operation type -> pg function name
 
+  // `public` exists in every database; any other schema the spec declares is its to create
+  out.schemas.push(...schemas.filter((name) => name !== "public").map((name) => `CREATE SCHEMA ${q(name)};`));
+
   // enums
-  for (const [, en] of pub.enums) {
+  for (const en of namespaces.flatMap((ns) => [...ns.enums.values()])) {
     const labels = [...en.members.values()].map((m) => litToSql(typeof m.value === "string" ? m.value : m.name));
-    out.types.push(`CREATE TYPE public.${q(en.name)} AS ENUM (${labels.join(", ")});`);
+    out.types.push(`CREATE TYPE ${qualified(en)} AS ENUM (${labels.join(", ")});`);
   }
 
   // ops: functions + cron
   const opsEverywhere = [];
   const collectOps = (ns) => { for (const [, op] of ns.operations) opsEverywhere.push(op); };
-  collectOps(pub);
+  namespaces.forEach(collectOps);
   const cronNs = glob.namespaces.get("cron");
   if (cronNs) collectOps(cronNs);
 
@@ -135,10 +150,10 @@ export async function emit(mainTsp) {
     let tag = "$function$";
     while (body.includes(tag)) tag = tag.replace("$", "$x");
     out.functions.push(
-      `CREATE FUNCTION public.${q(pgName)}(${params.join(", ")}) RETURNS ${ret}\n` +
+      `CREATE FUNCTION ${qualified(op, pgName)}(${params.join(", ")}) RETURNS ${ret}\n` +
       `LANGUAGE ${language}${rest ? " " + rest : ""}\nAS ${tag}\n${body}\n${tag};`,
     );
-    const sig = `public.${q(pgName)}(${params.map((p) => p.split(" DEFAULT ")[0]).join(", ")})`;
+    const sig = `${qualified(op, pgName)}(${params.map((p) => p.split(" DEFAULT ")[0]).join(", ")})`;
     out.grants.push(`REVOKE ALL ON FUNCTION ${sig} FROM PUBLIC;`);
     for (const g of opState(op).grants ?? []) {
       out.grants.push(`GRANT EXECUTE ON FUNCTION ${sig} TO ${g.role === "public" ? "PUBLIC" : q(g.role)};`);
@@ -147,14 +162,16 @@ export async function emit(mainTsp) {
 
   // models: tables, views, external
   const viewDefs = [];
-  for (const [, model] of pub.models) {
+  for (const model of namespaces.flatMap((ns) => [...ns.models.values()])) {
     const st = modelState(model);
     if (st.external) continue;
+    const table = qualified(model);
     if (st.view) {
       const loc = getSourceLocation(model);
       const body = readFileSync(join(dirname(loc.file.path), st.view.body ?? `./views/${model.name}.sql`), "utf8").trim();
-      viewDefs.push({ name: model.name, body, invoker: !!st.security_invoker, grants: st.grants ?? [] });
-      projections[model.name] = [...model.properties.values()].map((p) => [p.name, pgType(p.type, propState(p))]);
+      viewDefs.push({ name: model.name, rel: table, body, invoker: !!st.security_invoker, grants: st.grants ?? [] });
+      projections[catalogKey(schemaOf(model), model.name)] =
+        [...model.properties.values()].map((p) => [p.name, pgType(p.type, propState(p))]);
       continue;
     }
 
@@ -168,58 +185,59 @@ export async function emit(mainTsp) {
       else if (p.defaultValue) {
         const def = valueToSql(p.defaultValue);
         c += ` DEFAULT ${def}`;
-        // serial-style defaults imply their sequence; create it first
-        const seq = def.match(/nextval\('(?:public\.)?([^':]+)'/)?.[1];
-        if (seq) sequences.add(seq);
+        // serial-style defaults imply their sequence; create it first, in the
+        // schema the default names — unqualified, that is `public`
+        const seq = def.match(/nextval\('(?:([a-z_][a-z0-9_]*)\.)?([^':.]+)'/);
+        if (seq) sequences.add(rel(seq[1] ?? "public", seq[2]));
       }
       if (!p.optional && !ps.generated) c += " NOT NULL";
       if (ps.generated && !p.optional) c += " NOT NULL";
       cols.push("  " + c);
       for (const chk of ps.checks ?? []) {
         // checks may call spec functions, which are created after tables
-        tableAlters.push(`ALTER TABLE public.${q(model.name)} ADD CONSTRAINT ${q(chk.name ?? `${model.name}_${p.name}_check`)} CHECK ${chk.expr};`);
+        tableAlters.push(`ALTER TABLE ${table} ADD CONSTRAINT ${q(chk.name ?? `${model.name}_${p.name}_check`)} CHECK ${chk.expr};`);
       }
       if (ps.references) {
         const { ref, actions, name } = ps.references;
         const cname = name || `${model.name}_${p.name}_fkey`;
         out.fks.push(
-          `ALTER TABLE public.${q(model.name)} ADD CONSTRAINT ${q(cname)} FOREIGN KEY (${q(p.name)}) ` +
-          `REFERENCES public.${q(ref.model.name)}(${q(ref.name)})${actions ? " " + actions : ""};`,
+          `ALTER TABLE ${table} ADD CONSTRAINT ${q(cname)} FOREIGN KEY (${q(p.name)}) ` +
+          `REFERENCES ${qualified(ref.model)}(${q(ref.name)})${actions ? " " + actions : ""};`,
         );
       }
     }
     for (const chk of st.checks ?? []) {
-      tableAlters.push(`ALTER TABLE public.${q(model.name)} ADD CONSTRAINT ${q(chk.name ?? `${model.name}_check`)} CHECK ${chk.expr};`);
+      tableAlters.push(`ALTER TABLE ${table} ADD CONSTRAINT ${q(chk.name ?? `${model.name}_check`)} CHECK ${chk.expr};`);
     }
     if (st.pk) {
       cols.push(`  CONSTRAINT ${q(st.pk.name ?? `${model.name}_pkey`)} PRIMARY KEY (${st.pk.cols}),`);
     }
     const body = cols.map((c) => (c.endsWith(",") ? c : c + ",")).join("\n").replace(/,$/, "");
     const partition = st.partition_by ? ` PARTITION BY ${st.partition_by}` : "";
-    out.tables.push(`CREATE TABLE public.${q(model.name)} (\n${body}\n)${partition};`);
+    out.tables.push(`CREATE TABLE ${table} (\n${body}\n)${partition};`);
     out.alters.push(...tableAlters);
     for (const con of st.constraints ?? []) {
       const bucket = con.def.startsWith("FOREIGN KEY") ? out.fks : out.alters;
-      bucket.push(`ALTER TABLE public.${q(model.name)} ADD CONSTRAINT ${q(con.name)} ${con.def};`);
+      bucket.push(`ALTER TABLE ${table} ADD CONSTRAINT ${q(con.name)} ${con.def};`);
     }
-    if (st.rls) out.rls.push(`ALTER TABLE public.${q(model.name)} ENABLE ROW LEVEL SECURITY;`);
+    if (st.rls) out.rls.push(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;`);
     for (const tail of st.indexes ?? []) {
       const m = tail.match(/^(unique )?(\S+) (.+)$/s);
-      out.indexes.push(`CREATE ${m[1] ? "UNIQUE " : ""}INDEX ${q(m[2])} ON public.${q(model.name)} ${m[3]};`);
+      out.indexes.push(`CREATE ${m[1] ? "UNIQUE " : ""}INDEX ${q(m[2])} ON ${table} ${m[3]};`);
     }
     for (const pol of st.policies ?? []) {
-      out.policies.push(`CREATE POLICY "${pol.name.replaceAll('"', '""')}" ON public.${q(model.name)}\n${pol.tail};`);
+      out.policies.push(`CREATE POLICY "${pol.name.replaceAll('"', '""')}" ON ${table}\n${pol.tail};`);
     }
     for (const trg of st.triggers ?? []) {
       const [events, rest] = trg.fires.split(/\s+(?=FOR EACH\s)/i);
       const fnName = opPgName.get(trg.execute) ?? trg.execute.name;
       out.triggers.push(
-        `CREATE TRIGGER ${q(trg.name)} ${events} ON public.${q(model.name)} ${rest ?? "FOR EACH STATEMENT"} ` +
-        `EXECUTE FUNCTION public.${q(fnName)}();`,
+        `CREATE TRIGGER ${q(trg.name)} ${events} ON ${table} ${rest ?? "FOR EACH STATEMENT"} ` +
+        `EXECUTE FUNCTION ${qualified(trg.execute, fnName)}();`,
       );
     }
     for (const g of st.grants ?? []) {
-      out.grants.push(`GRANT ${g.privileges} ON public.${q(model.name)} TO ${q(g.role)};`);
+      out.grants.push(`GRANT ${g.privileges} ON ${table} TO ${q(g.role)};`);
     }
   }
 
@@ -235,30 +253,30 @@ export async function emit(mainTsp) {
     }
   }
 
-  // views: dependency-ordered (a view referencing another view comes later)
-  const names = new Set(viewDefs.map((v) => v.name));
+  // views: dependency-ordered (a view referencing another view comes later).
+  // Placement tracks the view, not its name: two schemas may share one.
   const ordered = [];
   const placed = new Set();
   let guard = viewDefs.length + 1;
   while (ordered.length < viewDefs.length && guard--) {
     for (const v of viewDefs) {
-      if (placed.has(v.name)) continue;
-      const deps = [...names].filter((n) => n !== v.name && new RegExp(`\\b${n}\\b`).test(v.body));
-      if (deps.every((d) => placed.has(d))) { ordered.push(v); placed.add(v.name); }
+      if (placed.has(v)) continue;
+      const deps = viewDefs.filter((d) => d.name !== v.name && new RegExp(`\\b${d.name}\\b`).test(v.body));
+      if (deps.every((d) => placed.has(d))) { ordered.push(v); placed.add(v); }
     }
   }
-  for (const v of viewDefs.filter((v) => !placed.has(v.name))) ordered.push(v);   // cycles: let PG error
+  for (const v of viewDefs.filter((v) => !placed.has(v))) ordered.push(v);   // cycles: let PG error
   for (const v of ordered) {
     const opt = v.invoker ? " WITH (security_invoker=true)" : "";
-    out.views.push(`CREATE VIEW public.${q(v.name)}${opt} AS\n${v.body}`);
-    for (const g of v.grants) out.views.push(`GRANT ${g.privileges} ON public.${q(v.name)} TO ${q(g.role)};`);
+    out.views.push(`CREATE VIEW ${v.rel}${opt} AS\n${v.body}`);
+    for (const g of v.grants) out.views.push(`GRANT ${g.privileges} ON ${v.rel} TO ${q(g.role)};`);
   }
 
-  out.sequences.push(...[...sequences].sort().map((s) => `CREATE SEQUENCE public.${q(s)};`));
+  out.sequences.push(...[...sequences].sort().map((s) => `CREATE SEQUENCE ${s};`));
   const ddl = [
     "SET check_function_bodies = off;",
-    ...out.types, ...out.sequences, ...out.tables, ...out.functions, ...out.alters, ...out.fks, ...out.indexes,
-    ...out.triggers, ...out.rls, ...out.policies, ...out.grants, ...out.views,
+    ...out.schemas, ...out.types, ...out.sequences, ...out.tables, ...out.functions, ...out.alters, ...out.fks,
+    ...out.indexes, ...out.triggers, ...out.rls, ...out.policies, ...out.grants, ...out.views,
   ].join("\n\n");
-  return { ddl, cron, projections };
+  return { ddl, cron, projections, schemas };
 }

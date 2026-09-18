@@ -1,5 +1,6 @@
 // Shadow prelude: minimal stand-ins for platform-owned surfaces the spec's
-// objects reference. Signature-compatible stubs; never compared.
+// objects reference. Signature-compatible stubs; never compared. A schema
+// created here is reserved in schemas.mjs, so no spec can declare it.
 export const prelude = (db) => `
 -- Supabase installs extensions outside public, reachable via search_path.
 CREATE SCHEMA extensions;
