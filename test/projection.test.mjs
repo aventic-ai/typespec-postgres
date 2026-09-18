@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { projectionProblems } from "../src/differ.mjs";
 const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
 
 async function emitView(model) {
-  const dir = mkdtempSync(join(tmpdir(), "pgspec-proj-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-proj-")));
   const lib = relative(dir, LIB).replaceAll("\\", "/");
   mkdirSync(join(dir, "views"));
   writeFileSync(join(dir, "views", "v.sql"), "select id from probes\n");

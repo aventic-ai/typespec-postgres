@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { emit } from "../src/emitter.mjs";
 const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
 
 function specDir(body) {
-  const dir = mkdtempSync(join(tmpdir(), "pgspec-emit-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-emit-")));
   const lib = relative(dir, LIB).replaceAll("\\", "/");
   writeFileSync(join(dir, "main.tsp"), `import "${lib.startsWith(".") ? lib : "./" + lib}";\n${body}`);
   return join(dir, "main.tsp");
