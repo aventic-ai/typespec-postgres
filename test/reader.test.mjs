@@ -1,18 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { readCatalog } from "../src/reader.mjs";
-import { rows, sql, script } from "../src/db.mjs";
-
-// Reads a real catalog, so it runs only when the SPEC_DB_* cluster answers and
-// carries the PostgREST roles the fixture grants to, as pgspec-check requires.
-function clusterHasPostgrestRoles() {
-  if (!process.env.SPEC_DB_PASSWORD) return false;
-  try {
-    const found = rows("postgres", "SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated', 'service_role')");
-    return found.length === 3;
-  } catch {
-    return false;
-  }
-}
+import { sql, script } from "../src/db.mjs";
+import { clusterHasPostgrestRoles } from "./harness.mjs";
 
 // Unique per run: the cluster may be shared with another checkout or CI job.
 const DB = `pgspec_reader_test_${process.pid}_${Date.now()}`;

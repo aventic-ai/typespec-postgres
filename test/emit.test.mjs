@@ -1,23 +1,6 @@
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { emit } from "../src/emitter.mjs";
-
-const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
-
-/** Writes main.tsp and the SQL bodies it reads; `files` is {relative path: text}. */
-function specDir(body, files = {}) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-emit-")));
-  const lib = relative(dir, LIB).replaceAll("\\", "/");
-  writeFileSync(join(dir, "main.tsp"), `import "${lib.startsWith(".") ? lib : "./" + lib}";\n${body}`);
-  for (const [name, text] of Object.entries(files)) {
-    mkdirSync(dirname(join(dir, name)), { recursive: true });
-    writeFileSync(join(dir, name), text);
-  }
-  return join(dir, "main.tsp");
-}
+import { specDir } from "./harness.mjs";
 
 describe("emit layering enforcement", () => {
   test("clean_spec_emits_ddl", async () => {
