@@ -122,6 +122,23 @@ describe("a schema's own grants", () => {
   });
 });
 
+describe("parameter modes", () => {
+  test("out_on_op_parameter_clean", async () => {
+    const violations = await lintSpec({
+      "identity/fns.tsp": `namespace \`public\`;\n@function("plpgsql")\nop new_token(@out token: text, @out hash: bytea): \`record\`;\n`,
+    });
+    expect(violations).toEqual([]);
+  });
+
+  test("out_on_column_flags", async () => {
+    const violations = await lintSpec({
+      "identity/t.tsp": `namespace \`public\`;\nmodel t {\n  @out\n  token: text;\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@out on t.token is a parameter mode: only an op parameter has one");
+  });
+});
+
 describe("model decorator formatting", () => {
   test("decorator_on_model_line_flags", async () => {
     const violations = await lintSpec({

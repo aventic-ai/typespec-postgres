@@ -13,7 +13,7 @@ const SCALAR_TO_PG = {
   timestamp_s: "timestamp without time zone", integer_s: "integer", jsonb_s: "jsonb",
   json_s: "json", boolean_s: "boolean", bigint_s: "bigint", smallint_s: "smallint",
   numeric_s: "numeric", date_s: "date", bytea_s: "bytea", float8_s: "double precision",
-  inet_s: "inet", trigger: "trigger",
+  inet_s: "inet", trigger: "trigger", record: "record",
 };
 
 function pgType(type, st = {}) {
@@ -204,7 +204,7 @@ export async function emit(mainTsp) {
 
     const params = [...op.parameters.properties.values()].map((p) => {
       const ps = propState(p);
-      let s = `${q(p.name)} ${pgType(p.type, ps)}`;
+      let s = `${ps.out ? "OUT " : ""}${q(p.name)} ${pgType(p.type, ps)}`;
       if (p.defaultValue) s += ` DEFAULT ${valueToSql(p.defaultValue)}`;
       else if (p.optional) s += ` DEFAULT NULL`;
       return s;

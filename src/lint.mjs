@@ -9,9 +9,10 @@
 // seen. A pure single-section file satisfies the ordering vacuously. Two
 // formatting rules sit one altitude down, on the individual declaration:
 // every inline decorator takes its own line, and a declaration's facts read
-// in the canonical decorator order (lib/layers.mjs FACT_ORDER). Foreign
-// decorators (@doc, …) are exempt from the section and order rules: the
-// vocabulary is exactly what lib/index.js implements.
+// in the canonical decorator order (lib/layers.mjs FACT_ORDER). One rule
+// is about the target: a parameter mode (@out) sits on an op parameter, since
+// a column has none. Foreign decorators (@doc, …) are exempt from the section
+// and order rules: the vocabulary is exactly what lib/index.js implements.
 import { getSourceLocation } from "@typespec/compiler";
 import { $decorators } from "../lib/index.js";
 import { sectionRank, factRank } from "../lib/layers.mjs";
@@ -45,7 +46,10 @@ function collectNamespace(ns, nsName, files, problems) {
     applications(model, files, problems);
     ownLineProblem(model, problems);
     factOrderProblem(model, problems);
-    for (const [, prop] of model.properties) applications(prop, files, problems);
+    for (const [, prop] of model.properties) {
+      applications(prop, files, problems);
+      columnModeProblem(prop, `${model.name}.${prop.name}`, problems);
+    }
   }
   for (const [, op] of ns.operations) {
     // cron jobs have no interface presence: the whole op is impl, and its
@@ -119,6 +123,16 @@ function ownLineViolation(type, label, problems) {
     seen.add(line);
   }
   return false;
+}
+
+// The emitter reads a mode only from an op's parameters, so on a column it
+// would say something the database never hears.
+function columnModeProblem(prop, label, problems) {
+  const mode = prop.decorators.find((d) => d.definition?.name === "@out");
+  if (!mode) return;
+  const loc = getSourceLocation(mode.node ?? prop.node);
+  if (!loc || isLibrary(loc.file.path)) return;
+  problems.push(problem(loc, `@out on ${label} is a parameter mode: only an op parameter has one`));
 }
 
 // A security- or impl-rank decorator belongs in its section as an augment,

@@ -28,6 +28,7 @@ extern dec security_definer(target: Model);
 // Functions
 extern dec function(target: Operation, options: valueof string, body?: valueof string);
 extern dec pg_name(target: Operation, name: valueof string);
+extern dec out(target: ModelProperty);   // an op parameter's mode; a column has none
 
 // Cron
 extern dec schedule(target: Operation, cron: valueof string);
@@ -79,4 +80,5 @@ namespace `public` {
   scalar inet_s extends string;
   alias inet = inet_s | sql;
   scalar trigger;   // fn return marker only — never defaulted, no alias
+  scalar `record`;  // fn return marker only: the row a function's OUT parameters make
 }

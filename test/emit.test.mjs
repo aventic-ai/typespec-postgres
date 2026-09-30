@@ -168,6 +168,27 @@ describe("a trigger whose events end in a deferral clause is a constraint trigge
   });
 });
 
+describe("a parameter declared @out", () => {
+  test("the_function_takes_it_with_its_mode", async () => {
+    const { ddl } = await emit(specDir(
+      `namespace chat {\n  using \`public\`;\n  @function("plpgsql volatile")\n` +
+      `  op new_token(@out token: text, @out hash: bytea): \`record\`;\n}\n`,
+      { "fn/new_token.sql": "begin token := 'x'; hash := 'x'::bytea; end\n" },
+    ));
+    expect(ddl).toContain("CREATE FUNCTION chat.new_token(OUT token text, OUT hash bytea) RETURNS record\n");
+    expect(ddl).toContain("REVOKE ALL ON FUNCTION chat.new_token(OUT token text, OUT hash bytea) FROM PUBLIC;");
+  });
+
+  test("it_sits_among_input_parameters_in_declared_order", async () => {
+    const { ddl } = await emit(specDir(
+      `namespace \`public\`;\n@function("sql stable")\nop digest(input: text, @out hash: bytea, salt?: text): bytea;\n`,
+      { "fn/digest.sql": "select 'x'::bytea\n" },
+    ));
+    expect(ddl).toContain("CREATE FUNCTION public.digest(input text, OUT hash bytea, salt text DEFAULT NULL) RETURNS bytea\n");
+    expect(ddl).toContain("REVOKE ALL ON FUNCTION public.digest(input text, OUT hash bytea, salt text) FROM PUBLIC;");
+  });
+});
+
 const sameNamedViews = (publicBody, chatBody) => specDir(
   `namespace \`public\` {\n  model probes { id: uuid; }\n  @security_invoker\n  @view("./views/public_v.sql")\n  model v { id: uuid; }\n}\n` +
   `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n  @security_invoker\n  @view("./views/chat_v.sql")\n  model v { id: uuid; }\n}\n`,
