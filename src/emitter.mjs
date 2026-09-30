@@ -4,7 +4,7 @@
 import { compile, NodeHost, getSourceLocation } from "@typespec/compiler";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { modelState, opState, propState } from "../lib/index.js";
+import { modelState, namespaceState, opState, propState } from "../lib/index.js";
 import { lintLayers } from "./lint.mjs";
 import { IDENTIFIER, MANAGED_ROLES, PLAIN_IDENTIFIER, catalogKey, declaredSchemas } from "./schemas.mjs";
 
@@ -57,18 +57,58 @@ const NEXTVAL = new RegExp(`nextval\\('(?:(${IDENTIFIER})\\.)?([^':.]+)'`);
 // events, which is also where pg_get_triggerdef prints it.
 const DEFERRAL = /^(?<events>.*?)\s+(?<deferral>(?:NOT\s+)?DEFERRABLE\b.*|INITIALLY\b.*)$/is;
 
-// The check reads a PostgREST role's reach into a schema beside `public` as
-// drift, so a grant to one inside it could never be used. Refuse it rather
-// than emit a privilege that only looks like access.
-function assertGrantable(type, name, grants) {
+// A schema beside `public` keeps its data from the PostgREST roles: they reach
+// it only through a function the spec opens to them, never through a table or
+// view there. USAGE the spec grants a role opens the schema that far and no
+// further, which is what a policy calling a helper needs. The check reads any
+// reach the spec did not grant as drift, so a grant with no USAGE behind it
+// could never be used: refuse it rather than emit a privilege that only looks
+// like access.
+function assertGrantable(type, name, grants, usage) {
   const schema = schemaOf(type);
   if (schema === "public") return;
-  const dead = grants.find((g) => MANAGED_ROLES.includes(g.role));
-  if (!dead) return;
-  throw new Error(
-    `${dead.role} cannot be granted anything on ${rel(schema, name)}: schema ${schema} is closed to the ` +
-    `PostgREST roles, and USAGE on it is drift`,
-  );
+  for (const { role } of grants.filter((g) => MANAGED_ROLES.includes(g.role))) {
+    if (type.kind !== "Operation") {
+      throw new Error(
+        `${role} cannot be granted anything on ${rel(schema, name)}: tables and views beside public stay ` +
+        `closed to the PostgREST roles, and USAGE on a schema opens only its functions`,
+      );
+    }
+    if (!usage.get(schema)?.has(role)) {
+      throw new Error(
+        `${role} cannot be granted anything on ${rel(schema, name)}: schema ${schema} is closed to ${role} ` +
+        `until the spec grants it USAGE, with @@grant(${schema}, "${role}", "usage")`,
+      );
+    }
+  }
+}
+
+// The roles each schema beside `public` grants USAGE to, the one privilege a
+// schema grant takes: it is all that calling a function there needs. A grant
+// on `public`, or on a namespace the spec never creates, would only look
+// declared: the check reads neither. TypeSpec applies an augment decorator on
+// a namespace once for every block that declares it, so a schema spread over
+// several files hands over the same grant once per block; a set keeps one.
+function schemaUsage(glob, schemas) {
+  const usage = new Map();
+  for (const [name, ns] of glob.namespaces) {
+    const grants = namespaceState(ns).grants ?? [];
+    if (!grants.length) continue;
+    if (name === "public") {
+      throw new Error(
+        "schema public cannot be granted anything: its privileges are the platform's, and the check never reads them",
+      );
+    }
+    if (!schemas.includes(name)) {
+      throw new Error(`${name} cannot be granted anything: it is not a schema the spec declares`);
+    }
+    const other = grants.find((g) => !/^usage$/i.test(g.privileges.trim()));
+    if (other) {
+      throw new Error(`${other.role} cannot be granted ${other.privileges} on schema ${name}: a schema grants usage only`);
+    }
+    usage.set(name, new Set(grants.map((g) => g.role)));
+  }
+  return usage;
 }
 
 function litToSql(v) {
@@ -132,6 +172,10 @@ export async function emit(mainTsp) {
 
   // `public` exists in every database; any other schema the spec declares is its to create
   out.schemas.push(...schemas.filter((name) => name !== "public").map((name) => `CREATE SCHEMA ${q(name)};`));
+  const usage = schemaUsage(glob, schemas);
+  for (const [schema, roles] of usage) {
+    for (const role of roles) out.grants.push(`GRANT USAGE ON SCHEMA ${q(schema)} TO ${q(role)};`);
+  }
 
   // enums
   for (const en of namespaces.flatMap((ns) => [...ns.enums.values()])) {
@@ -193,7 +237,7 @@ export async function emit(mainTsp) {
     );
     const sig = `${qualified(op, pgName)}(${params.map((p) => p.split(" DEFAULT ")[0]).join(", ")})`;
     out.grants.push(`REVOKE ALL ON FUNCTION ${sig} FROM PUBLIC;`);
-    assertGrantable(op, pgName, st.grants ?? []);
+    assertGrantable(op, pgName, st.grants ?? [], usage);
     for (const g of st.grants ?? []) {
       out.grants.push(`GRANT EXECUTE ON FUNCTION ${sig} TO ${g.role === "public" ? "PUBLIC" : q(g.role)};`);
     }
@@ -205,7 +249,7 @@ export async function emit(mainTsp) {
     const st = modelState(model);
     if (st.external) continue;
     const table = qualified(model);
-    assertGrantable(model, model.name, st.grants ?? []);
+    assertGrantable(model, model.name, st.grants ?? [], usage);
     if (st.view) {
       const body = readBody(model, st.view.body, `./views/${model.name}.sql`, table).trim();
       viewDefs.push({ name: model.name, rel: table, body, invoker: !!st.security_invoker, grants: st.grants ?? [] });

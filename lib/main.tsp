@@ -12,7 +12,7 @@ extern dec constraint(target: Model, name: valueof string, def: valueof string);
 extern dec identity(target: ModelProperty, kind: valueof string);
 extern dec references(target: ModelProperty, ref: ModelProperty, actions?: valueof string, name?: valueof string);
 extern dec generated(target: ModelProperty, sql: valueof string);
-extern dec grant(target: Model | Operation, role: valueof string, privileges: valueof string);
+extern dec grant(target: Model | Operation | Namespace, role: valueof string, privileges: valueof string);
 extern dec pg_type(target: ModelProperty, sqlType: valueof string);
 
 // Ledger decorators (used as @@ statements below the model)

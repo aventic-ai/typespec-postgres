@@ -97,6 +97,31 @@ describe("section ordering lint", () => {
   });
 });
 
+describe("a schema's own grants", () => {
+  test("a_schema_grant_is_a_security_statement", async () => {
+    const violations = await lintSpec({
+      "chat/rooms.tsp": `namespace chat {
+  using \`public\`;
+  model rooms { id: uuid; }
+  @function("plpgsql") op touch(): trigger;
+  @@trigger(rooms, "rooms_touch", "before update for each row", touch);
+  @@grant(chat, "authenticated", "usage");
+}
+`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("security-section @@grant follows impl-section @@trigger");
+  });
+
+  test("inline_grant_on_namespace_flags", async () => {
+    const violations = await lintSpec({
+      "chat/rooms.tsp": `@grant("authenticated", "usage")\nnamespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@grant must be an augment statement");
+  });
+});
+
 describe("model decorator formatting", () => {
   test("decorator_on_model_line_flags", async () => {
     const violations = await lintSpec({

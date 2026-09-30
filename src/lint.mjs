@@ -38,6 +38,8 @@ export function lintLayers(program) {
 // --- Internal Functions ---
 
 function collectNamespace(ns, nsName, files, problems) {
+  // a schema's own grants are security statements like any other
+  applications(ns, files, problems);
   for (const [, model] of ns.models) {
     declaration(model, `model ${model.name}`, 0, files);
     applications(model, files, problems);

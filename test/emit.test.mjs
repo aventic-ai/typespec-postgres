@@ -216,6 +216,71 @@ describe("a schema beside public is closed to the PostgREST roles", () => {
   });
 });
 
+describe("USAGE on a schema opens it to the functions granted there", () => {
+  const CHAT = `namespace chat {
+  using \`public\`;
+  model rooms { id: uuid; }
+  @security_invoker
+  @view
+  model open_rooms { id: integer; }
+  @function("sql stable")
+  op room_count(): bigint;
+}
+`;
+  const BODIES = { "fn/room_count.sql": "select 1\n", "views/open_rooms.sql": "select 1 as id\n" };
+  const opening = (grants) => specDir(`${CHAT}@@grant(chat, "authenticated", "usage");\n${grants}`, BODIES);
+
+  test("the_schema_grants_usage_and_its_function_execute", async () => {
+    const { ddl } = await emit(opening(`@@grant(chat.room_count, "authenticated", "execute");\n`));
+    expect(ddl).toContain("GRANT USAGE ON SCHEMA chat TO authenticated;");
+    expect(ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO authenticated;");
+  });
+
+  test.each([
+    ["a_table", "rooms"],
+    ["a_view", "open_rooms"],
+  ])("%s_there_stays_closed", async (_kind, target) => {
+    await expect(emit(opening(`@@grant(chat.${target}, "authenticated", "select");\n`))).rejects.toThrow(
+      new RegExp(`authenticated.*chat\\.${target}: tables and views beside public stay closed`),
+    );
+  });
+
+  test("a_function_stays_closed_to_a_role_the_schema_does_not_open", async () => {
+    await expect(emit(opening(`@@grant(chat.room_count, "anon", "execute");\n`))).rejects.toThrow(
+      'anon cannot be granted anything on chat.room_count: schema chat is closed to anon until the spec ' +
+      'grants it USAGE, with @@grant(chat, "anon", "usage")',
+    );
+  });
+
+  // TypeSpec hands an augment decorator on a namespace to every block that declares it.
+  test("a_schema_declared_in_two_files_grants_once", async () => {
+    const { ddl } = await emit(specDir(
+      `import "./members.tsp";\n${CHAT}@@grant(chat, "authenticated", "usage");\n`,
+      { ...BODIES, "members.tsp": `namespace chat {\n  using \`public\`;\n  model members { id: uuid; }\n}\n` },
+    ));
+    expect(ddl.match(/GRANT USAGE ON SCHEMA chat TO authenticated;/g)).toHaveLength(1);
+  });
+
+  test("usage_is_all_a_schema_grants", async () => {
+    await expect(emit(specDir(`${CHAT}@@grant(chat, "authenticated", "create");\n`, BODIES))).rejects.toThrow(
+      "authenticated cannot be granted create on schema chat: a schema grants usage only",
+    );
+  });
+
+  test("public_takes_no_schema_grant", async () => {
+    await expect(emit(specDir(`${CHAT}@@grant(\`public\`, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
+      /schema public cannot be granted anything: its privileges are the platform's/,
+    );
+  });
+
+  test("a_namespace_the_spec_never_creates_takes_no_schema_grant", async () => {
+    const vault = `namespace vault {\n  using \`public\`;\n  @external\n  model secrets { id: uuid; }\n}\n`;
+    await expect(emit(specDir(`${CHAT}${vault}@@grant(vault, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
+      "vault cannot be granted anything: it is not a schema the spec declares",
+    );
+  });
+});
+
 describe("declarations outside the spec's own schemas", () => {
   test("a_foreign_key_to_another_systems_table_names_that_schema", async () => {
     const { ddl } = await emit(specDir(
