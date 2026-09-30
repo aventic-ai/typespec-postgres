@@ -288,6 +288,22 @@ describe("USAGE on a schema opens it to the functions granted there", () => {
     );
   });
 
+  test("a_function_granted_to_public_needs_usage_for_every_postgrest_role", async () => {
+    await expect(emit(opening(`@@grant(chat.room_count, "public", "execute");\n`))).rejects.toThrow(
+      "public cannot be granted anything on chat.room_count: a grant to public reaches anon, and schema chat is " +
+      'closed to anon until the spec grants it USAGE, with @@grant(chat, "anon", "usage")',
+    );
+    const everyRole = ["anon", "authenticated", "service_role"].map((role) => `@@grant(chat, "${role}", "usage");\n`);
+    const { ddl } = await emit(specDir(`${CHAT}${everyRole.join("")}@@grant(chat.room_count, "public", "execute");\n`, BODIES));
+    expect(ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO PUBLIC;");
+  });
+
+  test("a_table_granted_to_public_stays_closed", async () => {
+    await expect(emit(opening(`@@grant(chat.rooms, "public", "select");\n`))).rejects.toThrow(
+      /^public cannot be granted anything on chat\.rooms: tables and views beside public stay closed/,
+    );
+  });
+
   // TypeSpec hands an augment decorator on a namespace to every block that declares it.
   test("a_schema_declared_in_two_files_grants_once", async () => {
     const { ddl } = await emit(specDir(

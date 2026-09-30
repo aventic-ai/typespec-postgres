@@ -11,8 +11,9 @@
 // every inline decorator takes its own line, and a declaration's facts read
 // in the canonical decorator order (lib/layers.mjs FACT_ORDER). One rule
 // is about the target: a parameter mode (@out) sits on an op parameter, since
-// a column has none. Foreign decorators (@doc, …) are exempt from the section
-// and order rules: the vocabulary is exactly what lib/index.js implements.
+// a column has none. A schema grant names the roles it opens, never public.
+// Foreign decorators (@doc, …) are exempt from the section and order rules:
+// the vocabulary is exactly what lib/index.js implements.
 import { getSourceLocation } from "@typespec/compiler";
 import { $decorators } from "../lib/index.js";
 import { sectionRank, factRank } from "../lib/layers.mjs";
@@ -41,6 +42,7 @@ export function lintLayers(program) {
 function collectNamespace(ns, nsName, files, problems) {
   // a schema's own grants are security statements like any other
   applications(ns, files, problems);
+  schemaGrantToPublicProblem(ns, problems);
   for (const [, model] of ns.models) {
     declaration(model, `model ${model.name}`, 0, files);
     applications(model, files, problems);
@@ -123,6 +125,18 @@ function ownLineViolation(type, label, problems) {
     seen.add(line);
   }
   return false;
+}
+
+// A schema opens to the roles it names. PUBLIC would open it to anon as well,
+// and the reader, which counts what each PostgREST role can do, could not
+// tell that grant from one to each of them.
+function schemaGrantToPublicProblem(ns, problems) {
+  const grant = ns.decorators.find((d) => d.definition?.name === "@grant" && d.args[0]?.jsValue === "public");
+  if (!grant) return;
+  const loc = getSourceLocation(grant.node ?? ns.node);
+  if (!loc || isLibrary(loc.file.path)) return;
+  problems.push(problem(loc,
+    `@@grant on schema ${ns.name} names public: a schema opens to the roles it names, and PUBLIC reaches anon too`));
 }
 
 // The emitter reads a mode only from an op's parameters, so on a column it

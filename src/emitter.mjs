@@ -99,20 +99,30 @@ function createTrigger(trg, table, functionName) {
 function assertGrantable(type, name, grants, usage) {
   const schema = schemaOf(type);
   if (schema === "public") return;
-  for (const { role } of grants.filter((g) => MANAGED_ROLES.includes(g.role))) {
-    if (type.kind !== "Operation") {
-      throw new Error(
-        `${role} cannot be granted anything on ${rel(schema, name)}: tables and views beside public stay ` +
-        `closed to the PostgREST roles, and USAGE on a schema opens only its functions`,
-      );
-    }
-    if (!usage.get(schema)?.has(role)) {
-      throw new Error(
-        `${role} cannot be granted anything on ${rel(schema, name)}: schema ${schema} is closed to ${role} ` +
-        `until the spec grants it USAGE, with @@grant(${schema}, "${role}", "usage")`,
-      );
+  for (const { role } of grants) {
+    for (const reached of reachedRoles(role)) {
+      if (type.kind !== "Operation") {
+        throw new Error(
+          `${role} cannot be granted anything on ${rel(schema, name)}: tables and views beside public stay ` +
+          `closed to the PostgREST roles, and USAGE on a schema opens only its functions`,
+        );
+      }
+      if (!usage.get(schema)?.has(reached)) {
+        const via = reached === role ? "" : `a grant to ${role} reaches ${reached}, and `;
+        throw new Error(
+          `${role} cannot be granted anything on ${rel(schema, name)}: ${via}schema ${schema} is closed to ` +
+          `${reached} until the spec grants it USAGE, with @@grant(${schema}, "${reached}", "usage")`,
+        );
+      }
     }
   }
+}
+
+// The PostgREST roles a grant reaches. PUBLIC reaches each of them by
+// membership, which is how the reader counts a privilege too.
+function reachedRoles(role) {
+  if (role === "public") return MANAGED_ROLES;
+  return MANAGED_ROLES.includes(role) ? [role] : [];
 }
 
 // The roles each schema beside `public` grants USAGE to, the one privilege a

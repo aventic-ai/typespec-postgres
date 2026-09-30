@@ -113,6 +113,16 @@ describe("a schema's own grants", () => {
     expect(violations[0].message).toContain("security-section @@grant follows impl-section @@trigger");
   });
 
+  test("schema_grant_to_public_flags", async () => {
+    const violations = await lintSpec({
+      "chat/rooms.tsp": `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n\n  @@grant(chat, "public", "usage");\n}\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toBe(
+      "@@grant on schema chat names public: a schema opens to the roles it names, and PUBLIC reaches anon too",
+    );
+  });
+
   test("inline_grant_on_namespace_flags", async () => {
     const violations = await lintSpec({
       "chat/rooms.tsp": `@grant("authenticated", "usage")\nnamespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n}\n`,
