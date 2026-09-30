@@ -9,11 +9,12 @@
 // seen. A pure single-section file satisfies the ordering vacuously. Two
 // formatting rules sit one altitude down, on the individual declaration:
 // every inline decorator takes its own line, and a declaration's facts read
-// in the canonical decorator order (lib/layers.mjs FACT_ORDER). One rule
-// is about the target: a parameter mode (@out) sits on an op parameter, since
-// a column has none. A schema grant names the roles it opens, never public.
-// Foreign decorators (@doc, …) are exempt from the section and order rules:
-// the vocabulary is exactly what lib/index.js implements.
+// in the canonical decorator order (lib/layers.mjs FACT_ORDER). Two rules
+// are about the target: a parameter mode (@out) sits on an op parameter, since
+// a column has none, and never on one with a default. A schema grant names the
+// roles it opens, never public. Foreign decorators (@doc, …) are exempt from
+// the section and order rules: the vocabulary is exactly what lib/index.js
+// implements.
 import { getSourceLocation } from "@typespec/compiler";
 import { $decorators } from "../lib/index.js";
 import { sectionRank, factRank } from "../lib/layers.mjs";
@@ -47,7 +48,7 @@ function collectNamespace(ns, nsName, files, problems) {
     declaration(model, `model ${model.name}`, 0, files);
     applications(model, files, problems);
     ownLineProblem(model, problems);
-    factOrderProblem(model, problems);
+    factOrderProblem(model, `model ${model.name}`, model.properties.values(), problems);
     for (const [, prop] of model.properties) {
       applications(prop, files, problems);
       columnModeProblem(prop, `${model.name}.${prop.name}`, problems);
@@ -59,8 +60,14 @@ function collectNamespace(ns, nsName, files, problems) {
     const rank = nsName === "cron" ? 2 : 0;
     declaration(op, `op ${op.name}`, rank, files);
     applications(op, files, problems, rank);
-    factOrderViolation(op, `op ${op.name}`, problems, rank);
-    for (const [, param] of op.parameters.properties) applications(param, files, problems, rank);
+    factOrderProblem(op, `op ${op.name}`, op.parameters.properties.values(), problems, rank);
+    for (const [, param] of op.parameters.properties) {
+      applications(param, files, problems, rank);
+      outDefaultProblem(param, `${op.name}.${param.name}`, problems);
+    }
+    for (const column of returnedColumns(op)) {
+      columnModeProblem(column, `${op.name}'s returned column ${column.name}`, problems);
+    }
   }
   for (const [, en] of ns.enums) {
     declaration(en, `enum ${en.name}`, 0, files);
@@ -139,14 +146,35 @@ function schemaGrantToPublicProblem(ns, problems) {
     `@@grant on schema ${ns.name} names public: a schema opens to the roles it names, and PUBLIC reaches anon too`));
 }
 
-// The emitter reads a mode only from an op's parameters, so on a column it
-// would say something the database never hears.
+// The emitter reads a mode only from an op's parameters, so on a column, a
+// table's or a returned TABLE(...)'s, it would say something the database
+// never hears.
 function columnModeProblem(prop, label, problems) {
   const mode = prop.decorators.find((d) => d.definition?.name === "@out");
   if (!mode) return;
   const loc = getSourceLocation(mode.node ?? prop.node);
   if (!loc || isLibrary(loc.file.path)) return;
   problems.push(problem(loc, `@out on ${label} is a parameter mode: only an op parameter has one`));
+}
+
+// Postgres gives a default to an input parameter only, so an OUT parameter
+// with `?` or a default compiles here and fails the shadow build with an
+// error that names no declaration.
+function outDefaultProblem(param, label, problems) {
+  if (!param.optional && !param.defaultValue) return;
+  const mode = param.decorators.find((d) => d.definition?.name === "@out");
+  if (!mode) return;
+  const loc = getSourceLocation(mode.node ?? param.node);
+  if (!loc || isLibrary(loc.file.path)) return;
+  problems.push(problem(loc, `@out on ${label} takes neither ? nor a default: only an input parameter has one`));
+}
+
+// The columns of a TABLE(...) return, which the spec writes as an array of an
+// anonymous model.
+function returnedColumns(op) {
+  const rt = op.returnType;
+  const row = rt.kind === "Model" && rt.name === "Array" ? rt.indexer?.value : undefined;
+  return row?.kind === "Model" && row.name === "" ? [...row.properties.values()] : [];
 }
 
 // A security- or impl-rank decorator belongs in its section as an augment,
@@ -158,12 +186,12 @@ const augmentRequired = (name, declRank) =>
 
 // A declaration's facts read in the canonical decorator order — kind and
 // identity, shape, invariants, then verbatim DDL (lib/layers.mjs FACT_ORDER).
-// Same granularity as the own-line rule: one violation per model, header and
-// properties together.
-function factOrderProblem(model, problems) {
-  if (factOrderViolation(model, `model ${model.name}`, problems)) return;
-  for (const [, prop] of model.properties) {
-    if (factOrderViolation(prop, `${model.name}.${prop.name}`, problems)) return;
+// Same granularity as the own-line rule: one violation per declaration, its
+// header and its members (a model's properties, an op's parameters) together.
+function factOrderProblem(decl, label, members, problems, declRank = 0) {
+  if (factOrderViolation(decl, label, problems, declRank)) return;
+  for (const member of members) {
+    if (factOrderViolation(member, `${decl.name}.${member.name}`, problems, declRank)) return;
   }
 }
 

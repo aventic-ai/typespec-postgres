@@ -140,6 +140,25 @@ describe("parameter modes", () => {
     expect(violations).toEqual([]);
   });
 
+  test.each([
+    ["optional", "@out a?: text"],
+    ["defaulted", '@out a: text = "x"'],
+  ])("out_%s_flags", async (_form, parameter) => {
+    const violations = await lintSpec({
+      "identity/fns.tsp": `namespace \`public\`;\n@function("plpgsql")\nop f(${parameter}): text;\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toBe("@out on f.a takes neither ? nor a default: only an input parameter has one");
+  });
+
+  test("out_on_returned_column_flags", async () => {
+    const violations = await lintSpec({
+      "identity/fns.tsp": `namespace \`public\`;\n@function("sql stable")\nop f(): { @out a: text }[];\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toBe("@out on f's returned column a is a parameter mode: only an op parameter has one");
+  });
+
   test("out_on_column_flags", async () => {
     const violations = await lintSpec({
       "identity/t.tsp": `namespace \`public\`;\nmodel t {\n  @out\n  token: text;\n}\n`,
@@ -274,6 +293,18 @@ model t {
     });
     expect(violations.length).toBe(1);
     expect(violations[0].message).toContain("@pg_name on op f__overload2 belongs above @function");
+  });
+
+  test("parameter_fact_order_clean_and_reverse_flags", async () => {
+    const clean = await lintSpec({
+      "platform/f.tsp": `namespace \`public\`;\n@function("plpgsql")\nop f(@out @pg_type("int4") x: integer): integer;\n`,
+    });
+    expect(clean).toEqual([]);
+    const violations = await lintSpec({
+      "platform/f.tsp": `namespace \`public\`;\n@function("plpgsql")\nop f(@pg_type("int4") @out x: integer): integer;\n`,
+    });
+    expect(violations.length).toBe(1);
+    expect(violations[0].message).toContain("@out on f.x belongs above @pg_type");
   });
 
   test("cron_command_before_schedule_flags", async () => {
