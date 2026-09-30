@@ -52,10 +52,42 @@ const typeRef = (type) => (schemaOf(type) === "public" ? type.name : qualified(t
 // A serial-style default, with the schema it names when it names one.
 const NEXTVAL = new RegExp(`nextval\\('(?:(${IDENTIFIER})\\.)?([^':.]+)'`);
 
-// A trigger's events followed by a deferral clause: only a constraint trigger
-// takes one, and Postgres wants the clause after the table, not among the
-// events, which is also where pg_get_triggerdef prints it.
-const DEFERRAL = /^(?<events>.*?)\s+(?<deferral>(?:NOT\s+)?DEFERRABLE\b.*|INITIALLY\b.*)$/is;
+// A trigger's timing and events, which its events string opens with. Every
+// clause after them (FROM, a deferral, REFERENCING, FOR EACH, WHEN) follows
+// the table in SQL, which is also where pg_get_triggerdef prints it.
+const TRIGGER_COLUMN = `(?:"(?:[^"]|"")+"|[^\\s,"]+)`;
+const TRIGGER_EVENT = `(?:INSERT|DELETE|TRUNCATE|UPDATE(?:\\s+OF\\s+${TRIGGER_COLUMN}(?:\\s*,\\s*${TRIGGER_COLUMN})*)?)`;
+const TRIGGER_EVENTS = new RegExp(
+  `^(?:BEFORE|AFTER|INSTEAD\\s+OF)\\s+${TRIGGER_EVENT}(?:\\s+OR\\s+${TRIGGER_EVENT})*(?=\\s|$)`, "i",
+);
+// Only a constraint trigger takes FROM or a deferral clause. WHEN comes last
+// and is the one clause holding an expression (`IS DISTINCT FROM` is common),
+// so the clauses before it are the ones read.
+const CONSTRAINT_CLAUSE = /\b(?:FROM|DEFERRABLE|INITIALLY)\b/i;
+const ROW_CLAUSE = /\bFOR\s+(?:EACH\s+)?(?:ROW|STATEMENT)\b/i;
+
+/** The CREATE [CONSTRAINT] TRIGGER statement for one @@trigger on `table`. */
+function createTrigger(trg, table, functionName) {
+  const fires = trg.fires.trim();
+  const events = fires.match(TRIGGER_EVENTS)?.[0];
+  if (!events) {
+    throw new Error(
+      `trigger ${trg.name} on ${table} fires "${fires}": the string opens with BEFORE, AFTER or INSTEAD OF ` +
+      `and the events, then any clauses`,
+    );
+  }
+  const clauses = fires.slice(events.length).trim();
+  const when = clauses.search(/\bWHEN\b/i);
+  const lead = when === -1 ? clauses : clauses.slice(0, when).trim();
+  const condition = when === -1 ? "" : clauses.slice(when);
+  const constraint = CONSTRAINT_CLAUSE.test(lead);
+  // with no row clause Postgres fires per statement, which a constraint trigger cannot
+  const perRow = ROW_CLAUSE.test(lead) ? "" : `FOR EACH ${constraint ? "ROW" : "STATEMENT"}`;
+  return [
+    constraint ? "CREATE CONSTRAINT TRIGGER" : "CREATE TRIGGER", q(trg.name), events, "ON", table,
+    lead, perRow, condition, `EXECUTE FUNCTION ${functionName}();`,
+  ].filter(Boolean).join(" ");
+}
 
 // A schema beside `public` keeps its data from the PostgREST roles: they reach
 // it only through a function the spec opens to them, never through a table or
@@ -312,13 +344,8 @@ export async function emit(mainTsp) {
       out.policies.push(`CREATE POLICY "${pol.name.replaceAll('"', '""')}" ON ${table}\n${pol.tail};`);
     }
     for (const trg of st.triggers ?? []) {
-      const [head, rest] = trg.fires.split(/\s+(?=FOR EACH\s)/i);
-      const { events, deferral } = head.match(DEFERRAL)?.groups ?? { events: head };
       const fnName = opPgName.get(trg.execute) ?? trg.execute.name;
-      out.triggers.push([
-        deferral ? "CREATE CONSTRAINT TRIGGER" : "CREATE TRIGGER", q(trg.name), events, "ON", table, deferral,
-        rest ?? "FOR EACH STATEMENT", `EXECUTE FUNCTION ${qualified(trg.execute, fnName)}();`,
-      ].filter(Boolean).join(" "));
+      out.triggers.push(createTrigger(trg, table, qualified(trg.execute, fnName)));
     }
     for (const g of st.grants ?? []) {
       out.grants.push(`GRANT ${g.privileges} ON ${table} TO ${q(g.role)};`);

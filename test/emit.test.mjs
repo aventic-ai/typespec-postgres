@@ -139,31 +139,46 @@ describe("public stays what it was", () => {
   });
 });
 
-describe("a trigger whose events end in a deferral clause is a constraint trigger", () => {
+describe("every clause after a trigger's events follows its table", () => {
   const firing = (fires) => specDir(
     `namespace \`public\`;\nmodel probes { id: uuid; deferrable_until?: timestamptz; }\n` +
     `@function("plpgsql") op keep_owner(): trigger;\n` +
     `@@trigger(probes, "probes_keep_owner", "${fires}", keep_owner);\n`,
     { "fn/keep_owner.sql": "begin return null; end\n" },
   );
+  const created = async (fires) => (await emit(firing(fires))).ddl.match(/^CREATE (?:CONSTRAINT )?TRIGGER .*$/m)?.[0];
 
   test.each([
     ["AFTER INSERT OR DELETE DEFERRABLE INITIALLY DEFERRED FOR EACH ROW",
       "AFTER INSERT OR DELETE ON public.probes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
     ["AFTER UPDATE NOT DEFERRABLE FOR EACH ROW", "AFTER UPDATE ON public.probes NOT DEFERRABLE FOR EACH ROW"],
     ["after update initially deferred for each row", "after update ON public.probes initially deferred for each row"],
-  ])("the_clause_moves_after_the_table: %s", async (fires, emitted) => {
-    const { ddl } = await emit(firing(fires));
-    expect(ddl).toContain(
+    ["AFTER INSERT DEFERRABLE INITIALLY DEFERRED", "AFTER INSERT ON public.probes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER INSERT FROM public.orgs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW",
+      "AFTER INSERT ON public.probes FROM public.orgs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER DELETE FROM public.orgs", "AFTER DELETE ON public.probes FROM public.orgs FOR EACH ROW"],
+    ["AFTER UPDATE DEFERRABLE FOR EACH ROW WHEN (new.id IS NOT NULL)",
+      "AFTER UPDATE ON public.probes DEFERRABLE FOR EACH ROW WHEN (new.id IS NOT NULL)"],
+  ])("a_constraint_trigger: %s", async (fires, emitted) => {
+    expect(await created(fires)).toBe(
       `CREATE CONSTRAINT TRIGGER probes_keep_owner ${emitted} EXECUTE FUNCTION public.keep_owner();`,
     );
   });
 
-  test("a_column_named_like_the_clause_leaves_a_plain_trigger", async () => {
-    const { ddl } = await emit(firing("AFTER UPDATE OF deferrable_until FOR EACH ROW"));
-    expect(ddl).toContain(
-      "CREATE TRIGGER probes_keep_owner AFTER UPDATE OF deferrable_until ON public.probes FOR EACH ROW " +
-      "EXECUTE FUNCTION public.keep_owner();",
+  test.each([
+    ["AFTER UPDATE OF deferrable_until FOR EACH ROW", "AFTER UPDATE OF deferrable_until ON public.probes FOR EACH ROW"],
+    ['AFTER UPDATE OF \\"deferrable\\" FOR EACH ROW', 'AFTER UPDATE OF "deferrable" ON public.probes FOR EACH ROW'],
+    ["AFTER UPDATE FOR EACH ROW WHEN ((old.id IS DISTINCT FROM new.id))",
+      "AFTER UPDATE ON public.probes FOR EACH ROW WHEN ((old.id IS DISTINCT FROM new.id))"],
+    ["BEFORE TRUNCATE", "BEFORE TRUNCATE ON public.probes FOR EACH STATEMENT"],
+  ])("a_plain_trigger: %s", async (fires, emitted) => {
+    expect(await created(fires)).toBe(`CREATE TRIGGER probes_keep_owner ${emitted} EXECUTE FUNCTION public.keep_owner();`);
+  });
+
+  test("a_string_that_does_not_open_with_the_events_is_refused", async () => {
+    await expect(emit(firing("FOR EACH ROW"))).rejects.toThrow(
+      'trigger probes_keep_owner on public.probes fires "FOR EACH ROW": the string opens with BEFORE, AFTER or ' +
+      "INSTEAD OF and the events, then any clauses",
     );
   });
 });

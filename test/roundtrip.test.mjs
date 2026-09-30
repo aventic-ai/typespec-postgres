@@ -30,6 +30,10 @@ const SPEC = `namespace chat {
     owner_id?: uuid;
   }
 
+  model owners {
+    id: uuid;
+  }
+
   @function("plpgsql")
   op keep_owner(): trigger;
 
@@ -47,7 +51,9 @@ const SPEC = `namespace chat {
 
   // ── impl ──────────────────────────────────────────────
 
-  @@trigger(rooms, "rooms_keep_owner", "AFTER INSERT OR UPDATE DEFERRABLE INITIALLY DEFERRED FOR EACH ROW", keep_owner);
+  @@trigger(rooms, "rooms_keep_owner", """
+    AFTER INSERT OR UPDATE FROM chat.owners DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (new.owner_id IS NOT NULL)
+    """, keep_owner);
 }
 `;
 
@@ -57,12 +63,13 @@ const SPEC = `namespace chat {
 const MIGRATION = `
 CREATE SCHEMA chat;
 CREATE TABLE chat.rooms (id uuid PRIMARY KEY, owner_id uuid);
+CREATE TABLE chat.owners (id uuid NOT NULL);
 CREATE FUNCTION chat.keep_owner() RETURNS trigger LANGUAGE plpgsql AS $$${BODIES.keep_owner}$$;
 CREATE FUNCTION chat.room_count() RETURNS bigint LANGUAGE sql STABLE AS $$${BODIES.room_count}$$;
 CREATE FUNCTION chat.new_token(OUT token text, OUT hash bytea) LANGUAGE sql AS $$${BODIES.new_token}$$;
 REVOKE ALL ON FUNCTION chat.keep_owner(), chat.room_count(), chat.new_token() FROM PUBLIC;
-CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION chat.keep_owner();
+CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms FROM chat.owners
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (new.owner_id IS NOT NULL) EXECUTE FUNCTION chat.keep_owner();
 GRANT USAGE ON SCHEMA chat TO authenticated;
 GRANT EXECUTE ON FUNCTION chat.room_count() TO authenticated;
 `;
@@ -71,8 +78,8 @@ GRANT EXECUTE ON FUNCTION chat.room_count() TO authenticated;
 // schema's USAGE and new_token's parameter modes.
 const DRIFT = `
 DROP TRIGGER rooms_keep_owner ON chat.rooms;
-CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms
-  DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION chat.keep_owner();
+CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms FROM chat.owners
+  DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW WHEN (new.owner_id IS NOT NULL) EXECUTE FUNCTION chat.keep_owner();
 REVOKE USAGE ON SCHEMA chat FROM authenticated;
 DROP FUNCTION chat.new_token();
 CREATE FUNCTION chat.new_token(token text, hash bytea) RETURNS record LANGUAGE sql AS $$${BODIES.new_token}$$;
@@ -99,10 +106,10 @@ describe.skipIf(!clusterHasPostgrestRoles())("a spec checked against the databas
     for (const db of [SHADOW, LIVE, DRIFTED]) sql("postgres", `DROP DATABASE IF EXISTS ${db}`);
   });
 
-  test("a_constraint_trigger_reads_back_with_its_deferral_after_the_table", () => {
+  test("a_constraint_trigger_reads_back_with_its_clauses_after_the_table", () => {
     expect(live.triggers["chat.rooms:rooms_keep_owner"]).toBe(
-      "CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms " +
-      "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION chat.keep_owner()",
+      "CREATE CONSTRAINT TRIGGER rooms_keep_owner AFTER INSERT OR UPDATE ON chat.rooms FROM chat.owners " +
+      "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.owner_id IS NOT NULL)) EXECUTE FUNCTION chat.keep_owner()",
     );
     // Postgres records it as a constraint too, whose definition is its deferral.
     expect(live.tables["chat.rooms"].constraints.rooms_keep_owner).toEqual({

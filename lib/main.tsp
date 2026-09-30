@@ -18,6 +18,9 @@ extern dec pg_type(target: ModelProperty, sqlType: valueof string);
 // Ledger decorators (used as @@ statements below the model)
 extern dec index(target: Model, tail: valueof string);
 extern dec policy(target: Model, name: valueof string, tail: valueof string);
+// fires: the timing and events, then any clauses in the order Postgres takes
+// them after the table (FROM, a deferral, REFERENCING, FOR EACH, WHEN). FROM or
+// a deferral clause makes it a constraint trigger, which fires per row.
 extern dec trigger(target: Model, name: valueof string, fires: valueof string, execute: Operation);
 
 // Views
