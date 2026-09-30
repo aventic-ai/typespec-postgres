@@ -52,6 +52,11 @@ const typeRef = (type) => (schemaOf(type) === "public" ? type.name : qualified(t
 // A serial-style default, with the schema it names when it names one.
 const NEXTVAL = new RegExp(`nextval\\('(?:(${IDENTIFIER})\\.)?([^':.]+)'`);
 
+// A trigger's events followed by a deferral clause: only a constraint trigger
+// takes one, and Postgres wants the clause after the table, not among the
+// events, which is also where pg_get_triggerdef prints it.
+const DEFERRAL = /^(?<events>.*?)\s+(?<deferral>(?:NOT\s+)?DEFERRABLE\b.*|INITIALLY\b.*)$/is;
+
 // The check reads a PostgREST role's reach into a schema beside `public` as
 // drift, so a grant to one inside it could never be used. Refuse it rather
 // than emit a privilege that only looks like access.
@@ -263,12 +268,13 @@ export async function emit(mainTsp) {
       out.policies.push(`CREATE POLICY "${pol.name.replaceAll('"', '""')}" ON ${table}\n${pol.tail};`);
     }
     for (const trg of st.triggers ?? []) {
-      const [events, rest] = trg.fires.split(/\s+(?=FOR EACH\s)/i);
+      const [head, rest] = trg.fires.split(/\s+(?=FOR EACH\s)/i);
+      const { events, deferral } = head.match(DEFERRAL)?.groups ?? { events: head };
       const fnName = opPgName.get(trg.execute) ?? trg.execute.name;
-      out.triggers.push(
-        `CREATE TRIGGER ${q(trg.name)} ${events} ON ${table} ${rest ?? "FOR EACH STATEMENT"} ` +
-        `EXECUTE FUNCTION ${qualified(trg.execute, fnName)}();`,
-      );
+      out.triggers.push([
+        deferral ? "CREATE CONSTRAINT TRIGGER" : "CREATE TRIGGER", q(trg.name), events, "ON", table, deferral,
+        rest ?? "FOR EACH STATEMENT", `EXECUTE FUNCTION ${qualified(trg.execute, fnName)}();`,
+      ].filter(Boolean).join(" "));
     }
     for (const g of st.grants ?? []) {
       out.grants.push(`GRANT ${g.privileges} ON ${table} TO ${q(g.role)};`);

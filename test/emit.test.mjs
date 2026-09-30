@@ -139,6 +139,35 @@ describe("public stays what it was", () => {
   });
 });
 
+describe("a trigger whose events end in a deferral clause is a constraint trigger", () => {
+  const firing = (fires) => specDir(
+    `namespace \`public\`;\nmodel probes { id: uuid; deferrable_until?: timestamptz; }\n` +
+    `@function("plpgsql") op keep_owner(): trigger;\n` +
+    `@@trigger(probes, "probes_keep_owner", "${fires}", keep_owner);\n`,
+    { "fn/keep_owner.sql": "begin return null; end\n" },
+  );
+
+  test.each([
+    ["AFTER INSERT OR DELETE DEFERRABLE INITIALLY DEFERRED FOR EACH ROW",
+      "AFTER INSERT OR DELETE ON public.probes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER UPDATE NOT DEFERRABLE FOR EACH ROW", "AFTER UPDATE ON public.probes NOT DEFERRABLE FOR EACH ROW"],
+    ["after update initially deferred for each row", "after update ON public.probes initially deferred for each row"],
+  ])("the_clause_moves_after_the_table: %s", async (fires, emitted) => {
+    const { ddl } = await emit(firing(fires));
+    expect(ddl).toContain(
+      `CREATE CONSTRAINT TRIGGER probes_keep_owner ${emitted} EXECUTE FUNCTION public.keep_owner();`,
+    );
+  });
+
+  test("a_column_named_like_the_clause_leaves_a_plain_trigger", async () => {
+    const { ddl } = await emit(firing("AFTER UPDATE OF deferrable_until FOR EACH ROW"));
+    expect(ddl).toContain(
+      "CREATE TRIGGER probes_keep_owner AFTER UPDATE OF deferrable_until ON public.probes FOR EACH ROW " +
+      "EXECUTE FUNCTION public.keep_owner();",
+    );
+  });
+});
+
 const sameNamedViews = (publicBody, chatBody) => specDir(
   `namespace \`public\` {\n  model probes { id: uuid; }\n  @security_invoker\n  @view("./views/public_v.sql")\n  model v { id: uuid; }\n}\n` +
   `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n  @security_invoker\n  @view("./views/chat_v.sql")\n  model v { id: uuid; }\n}\n`,
