@@ -1,23 +1,6 @@
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { emit } from "../src/emitter.mjs";
-
-const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
-
-/** Writes main.tsp and the SQL bodies it reads; `files` is {relative path: text}. */
-function specDir(body, files = {}) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-emit-")));
-  const lib = relative(dir, LIB).replaceAll("\\", "/");
-  writeFileSync(join(dir, "main.tsp"), `import "${lib.startsWith(".") ? lib : "./" + lib}";\n${body}`);
-  for (const [name, text] of Object.entries(files)) {
-    mkdirSync(dirname(join(dir, name)), { recursive: true });
-    writeFileSync(join(dir, name), text);
-  }
-  return join(dir, "main.tsp");
-}
+import { specDir } from "./harness.mjs";
 
 describe("emit layering enforcement", () => {
   test("clean_spec_emits_ddl", async () => {
@@ -156,6 +139,71 @@ describe("public stays what it was", () => {
   });
 });
 
+describe("every clause after a trigger's events follows its table", () => {
+  const firing = (fires) => specDir(
+    `namespace \`public\`;\nmodel probes { id: uuid; deferrable_until?: timestamptz; }\n` +
+    `@function("plpgsql") op keep_owner(): trigger;\n` +
+    `@@trigger(probes, "probes_keep_owner", "${fires}", keep_owner);\n`,
+    { "fn/keep_owner.sql": "begin return null; end\n" },
+  );
+  const created = async (fires) => (await emit(firing(fires))).ddl.match(/^CREATE (?:CONSTRAINT )?TRIGGER .*$/m)?.[0];
+
+  test.each([
+    ["AFTER INSERT OR DELETE DEFERRABLE INITIALLY DEFERRED FOR EACH ROW",
+      "AFTER INSERT OR DELETE ON public.probes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER UPDATE NOT DEFERRABLE FOR EACH ROW", "AFTER UPDATE ON public.probes NOT DEFERRABLE FOR EACH ROW"],
+    ["after update initially deferred for each row", "after update ON public.probes initially deferred for each row"],
+    ["AFTER INSERT DEFERRABLE INITIALLY DEFERRED", "AFTER INSERT ON public.probes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER INSERT FROM public.orgs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW",
+      "AFTER INSERT ON public.probes FROM public.orgs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"],
+    ["AFTER DELETE FROM public.orgs", "AFTER DELETE ON public.probes FROM public.orgs FOR EACH ROW"],
+    ["AFTER UPDATE DEFERRABLE FOR EACH ROW WHEN (new.id IS NOT NULL)",
+      "AFTER UPDATE ON public.probes DEFERRABLE FOR EACH ROW WHEN (new.id IS NOT NULL)"],
+  ])("a_constraint_trigger: %s", async (fires, emitted) => {
+    expect(await created(fires)).toBe(
+      `CREATE CONSTRAINT TRIGGER probes_keep_owner ${emitted} EXECUTE FUNCTION public.keep_owner();`,
+    );
+  });
+
+  test.each([
+    ["AFTER UPDATE OF deferrable_until FOR EACH ROW", "AFTER UPDATE OF deferrable_until ON public.probes FOR EACH ROW"],
+    ['AFTER UPDATE OF \\"deferrable\\" FOR EACH ROW', 'AFTER UPDATE OF "deferrable" ON public.probes FOR EACH ROW'],
+    ["AFTER UPDATE FOR EACH ROW WHEN ((old.id IS DISTINCT FROM new.id))",
+      "AFTER UPDATE ON public.probes FOR EACH ROW WHEN ((old.id IS DISTINCT FROM new.id))"],
+    ["BEFORE TRUNCATE", "BEFORE TRUNCATE ON public.probes FOR EACH STATEMENT"],
+  ])("a_plain_trigger: %s", async (fires, emitted) => {
+    expect(await created(fires)).toBe(`CREATE TRIGGER probes_keep_owner ${emitted} EXECUTE FUNCTION public.keep_owner();`);
+  });
+
+  test("a_string_that_does_not_open_with_the_events_is_refused", async () => {
+    await expect(emit(firing("FOR EACH ROW"))).rejects.toThrow(
+      'trigger probes_keep_owner on public.probes fires "FOR EACH ROW": the string opens with BEFORE, AFTER or ' +
+      "INSTEAD OF and the events, then any clauses",
+    );
+  });
+});
+
+describe("a parameter declared @out", () => {
+  test("the_function_takes_it_with_its_mode", async () => {
+    const { ddl } = await emit(specDir(
+      `namespace chat {\n  using \`public\`;\n  @function("plpgsql volatile")\n` +
+      `  op new_token(@out token: text, @out hash: bytea): \`record\`;\n}\n`,
+      { "fn/new_token.sql": "begin token := 'x'; hash := 'x'::bytea; end\n" },
+    ));
+    expect(ddl).toContain("CREATE FUNCTION chat.new_token(OUT token text, OUT hash bytea) RETURNS record\n");
+    expect(ddl).toContain("REVOKE ALL ON FUNCTION chat.new_token(OUT token text, OUT hash bytea) FROM PUBLIC;");
+  });
+
+  test("it_sits_among_input_parameters_in_declared_order", async () => {
+    const { ddl } = await emit(specDir(
+      `namespace \`public\`;\n@function("sql stable")\nop digest(input: text, @out hash: bytea, salt?: text): bytea;\n`,
+      { "fn/digest.sql": "select 'x'::bytea\n" },
+    ));
+    expect(ddl).toContain("CREATE FUNCTION public.digest(input text, OUT hash bytea, salt text DEFAULT NULL) RETURNS bytea\n");
+    expect(ddl).toContain("REVOKE ALL ON FUNCTION public.digest(input text, OUT hash bytea, salt text) FROM PUBLIC;");
+  });
+});
+
 const sameNamedViews = (publicBody, chatBody) => specDir(
   `namespace \`public\` {\n  model probes { id: uuid; }\n  @security_invoker\n  @view("./views/public_v.sql")\n  model v { id: uuid; }\n}\n` +
   `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n  @security_invoker\n  @view("./views/chat_v.sql")\n  model v { id: uuid; }\n}\n`,
@@ -200,6 +248,87 @@ describe("a schema beside public is closed to the PostgREST roles", () => {
   ])("a_grant_on_%s_there_is_refused", async (_kind, declaration, target) => {
     expect(emit(granting(declaration, target))).rejects.toThrow(
       new RegExp(`service_role.*chat\\.${target}.*USAGE`, "s"),
+    );
+  });
+});
+
+describe("USAGE on a schema opens it to the functions granted there", () => {
+  const CHAT = `namespace chat {
+  using \`public\`;
+  model rooms { id: uuid; }
+  @security_invoker
+  @view
+  model open_rooms { id: integer; }
+  @function("sql stable")
+  op room_count(): bigint;
+}
+`;
+  const BODIES = { "fn/room_count.sql": "select 1\n", "views/open_rooms.sql": "select 1 as id\n" };
+  const opening = (grants) => specDir(`${CHAT}@@grant(chat, "authenticated", "usage");\n${grants}`, BODIES);
+
+  test("the_schema_grants_usage_and_its_function_execute", async () => {
+    const { ddl } = await emit(opening(`@@grant(chat.room_count, "authenticated", "execute");\n`));
+    expect(ddl).toContain("GRANT USAGE ON SCHEMA chat TO authenticated;");
+    expect(ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO authenticated;");
+  });
+
+  test.each([
+    ["a_table", "rooms"],
+    ["a_view", "open_rooms"],
+  ])("%s_there_stays_closed", async (_kind, target) => {
+    await expect(emit(opening(`@@grant(chat.${target}, "authenticated", "select");\n`))).rejects.toThrow(
+      new RegExp(`authenticated.*chat\\.${target}: tables and views beside public stay closed`),
+    );
+  });
+
+  test("a_function_stays_closed_to_a_role_the_schema_does_not_open", async () => {
+    await expect(emit(opening(`@@grant(chat.room_count, "anon", "execute");\n`))).rejects.toThrow(
+      'anon cannot be granted anything on chat.room_count: schema chat is closed to anon until the spec ' +
+      'grants it USAGE, with @@grant(chat, "anon", "usage")',
+    );
+  });
+
+  test("a_function_granted_to_public_needs_usage_for_every_postgrest_role", async () => {
+    await expect(emit(opening(`@@grant(chat.room_count, "public", "execute");\n`))).rejects.toThrow(
+      "public cannot be granted anything on chat.room_count: a grant to public reaches anon, and schema chat is " +
+      'closed to anon until the spec grants it USAGE, with @@grant(chat, "anon", "usage")',
+    );
+    const everyRole = ["anon", "authenticated", "service_role"].map((role) => `@@grant(chat, "${role}", "usage");\n`);
+    const { ddl } = await emit(specDir(`${CHAT}${everyRole.join("")}@@grant(chat.room_count, "public", "execute");\n`, BODIES));
+    expect(ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO PUBLIC;");
+  });
+
+  test("a_table_granted_to_public_stays_closed", async () => {
+    await expect(emit(opening(`@@grant(chat.rooms, "public", "select");\n`))).rejects.toThrow(
+      /^public cannot be granted anything on chat\.rooms: tables and views beside public stay closed/,
+    );
+  });
+
+  // TypeSpec hands an augment decorator on a namespace to every block that declares it.
+  test("a_schema_declared_in_two_files_grants_once", async () => {
+    const { ddl } = await emit(specDir(
+      `import "./members.tsp";\n${CHAT}@@grant(chat, "authenticated", "usage");\n`,
+      { ...BODIES, "members.tsp": `namespace chat {\n  using \`public\`;\n  model members { id: uuid; }\n}\n` },
+    ));
+    expect(ddl.match(/GRANT USAGE ON SCHEMA chat TO authenticated;/g)).toHaveLength(1);
+  });
+
+  test("usage_is_all_a_schema_grants", async () => {
+    await expect(emit(specDir(`${CHAT}@@grant(chat, "authenticated", "create");\n`, BODIES))).rejects.toThrow(
+      "authenticated cannot be granted create on schema chat: a schema grants usage only",
+    );
+  });
+
+  test("public_takes_no_schema_grant", async () => {
+    await expect(emit(specDir(`${CHAT}@@grant(\`public\`, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
+      /schema public cannot be granted anything: its privileges are the platform's/,
+    );
+  });
+
+  test("a_namespace_the_spec_never_creates_takes_no_schema_grant", async () => {
+    const vault = `namespace vault {\n  using \`public\`;\n  @external\n  model secrets { id: uuid; }\n}\n`;
+    await expect(emit(specDir(`${CHAT}${vault}@@grant(vault, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
+      "vault cannot be granted anything: it is not a schema the spec declares",
     );
   });
 });
