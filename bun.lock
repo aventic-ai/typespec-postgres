@@ -5,7 +5,7 @@
     "": {
       "name": "typespec-postgres",
       "dependencies": {
-        "@typespec/compiler": "1.16.0",
+        "@typespec/compiler": "^1.16.0",
       },
     },
   },

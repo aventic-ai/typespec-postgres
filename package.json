@@ -5,5 +5,5 @@
   "type": "module",
   "tspMain": "lib/main.tsp",
   "bin": { "pgspec-check": "./src/check.mjs" },
-  "dependencies": { "@typespec/compiler": "1.16.0" }
+  "dependencies": { "@typespec/compiler": "^1.16.0" }
 }
