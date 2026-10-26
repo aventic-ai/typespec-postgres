@@ -183,6 +183,28 @@ describe("every clause after a trigger's events follows its table", () => {
   });
 });
 
+describe("a trigger's arguments", () => {
+  const withArgs = (args) => specDir(
+    `namespace \`public\`;\nmodel probes { id: uuid; }\n` +
+    `@function("plpgsql") op check_keys(): trigger;\n` +
+    `@@trigger(probes, "probes_check", "BEFORE INSERT FOR EACH ROW", check_keys${args});\n`,
+    { "fn/check_keys.sql": "begin return new; end\n" },
+  );
+  const executed = async (args) => (await emit(withArgs(args))).ddl.match(/EXECUTE FUNCTION .*$/m)?.[0];
+
+  test("none_emits_an_empty_argument_list", async () => {
+    expect(await executed("")).toBe("EXECUTE FUNCTION public.check_keys();");
+  });
+
+  test("each_becomes_a_string_literal_in_order", async () => {
+    expect(await executed(', "a_id", "b_id"')).toBe("EXECUTE FUNCTION public.check_keys('a_id', 'b_id');");
+  });
+
+  test("a_single_quote_is_doubled", async () => {
+    expect(await executed(`, "o'brien"`)).toBe("EXECUTE FUNCTION public.check_keys('o''brien');");
+  });
+});
+
 describe("a parameter declared @out", () => {
   test("the_function_takes_it_with_its_mode", async () => {
     const { ddl } = await emit(specDir(

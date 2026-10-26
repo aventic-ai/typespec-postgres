@@ -83,9 +83,10 @@ function createTrigger(trg, table, functionName) {
   const constraint = CONSTRAINT_CLAUSE.test(lead);
   // with no row clause Postgres fires per statement, which a constraint trigger cannot
   const perRow = ROW_CLAUSE.test(lead) ? "" : `FOR EACH ${constraint ? "ROW" : "STATEMENT"}`;
+  const argList = (trg.args ?? []).map(litToSql).join(", ");
   return [
     constraint ? "CREATE CONSTRAINT TRIGGER" : "CREATE TRIGGER", q(trg.name), events, "ON", table,
-    lead, perRow, condition, `EXECUTE FUNCTION ${functionName}();`,
+    lead, perRow, condition, `EXECUTE FUNCTION ${functionName}(${argList});`,
   ].filter(Boolean).join(" ");
 }
 
