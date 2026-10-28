@@ -21,7 +21,14 @@ extern dec policy(target: Model, name: valueof string, tail: valueof string);
 // fires: the timing and events, then any clauses in the order Postgres takes
 // them after the table (FROM, a deferral, REFERENCING, FOR EACH, WHEN). FROM or
 // a deferral clause makes it a constraint trigger, which fires per row.
-extern dec trigger(target: Model, name: valueof string, fires: valueof string, execute: Operation);
+// args: string arguments passed to the function, which reads them as TG_ARGV.
+extern dec trigger(
+  target: Model,
+  name: valueof string,
+  fires: valueof string,
+  execute: Operation,
+  ...args: valueof string[]
+);
 
 // Views
 extern dec view(target: Model, body?: valueof string);
