@@ -3,29 +3,33 @@
 // top-level namespace is one when it owns something the emitter creates: a
 // namespace of aliases, or of tables another system owns, is not.
 import { modelState, opState } from "../lib/index.js";
-import { PLATFORM_SCHEMAS } from "./prelude.mjs";
-
-/** The roles PostgREST serves requests as: the ones whose privileges the check compares. */
-export const MANAGED_ROLES = ["anon", "authenticated", "service_role"];
 
 /** An identifier Postgres takes unquoted. */
 export const IDENTIFIER = "[a-z_][a-z0-9_]*";
 export const PLAIN_IDENTIFIER = new RegExp(`^${IDENTIFIER}$`);
 
-// Schema names are interpolated into catalog queries, so nothing that needs
-// quoting is accepted.
-function assertPlain(names) {
-  const odd = names.filter((name) => !PLAIN_IDENTIFIER.test(name));
-  if (odd.length) throw new Error(`a schema name must be a plain identifier: ${odd.join(", ")}`);
+/**
+ * Refuses a name that needs quoting: schema and role names are interpolated
+ * into DDL and catalog queries. `kind` names them in the error.
+ */
+export function assertPlain(kind, names, pattern = PLAIN_IDENTIFIER) {
+  const odd = names.filter((name) => !pattern.test(name));
+  if (odd.length) throw new Error(`a ${kind} must be a plain identifier: ${odd.map((n) => JSON.stringify(n)).join(", ")}`);
 }
 
-const owns = (ns) =>
-  [...ns.models.values()].some((model) => !modelState(model).external) ||
-  ns.enums.size > 0 ||
-  [...ns.operations.values()].some((op) => opState(op).fn);
+// What a namespace holds that the emitter creates: a table or view of its own,
+// an enum, a function.
+const ownedNames = (ns) => [
+  ...[...ns.models.values()].filter((model) => !modelState(model).external).map((model) => model.name),
+  ...ns.enums.keys(),
+  ...[...ns.operations.values()].filter((op) => opState(op).fn).map((op) => op.name),
+];
 
-/** The schemas a compiled spec declares, `public` first. */
-export function declaredSchemas(globalNamespace) {
+/**
+ * The schemas a compiled spec declares, `public` first. Refuses an object in
+ * one of `platform.schemas`, and in `public` unless the spec's data lives there.
+ */
+export function declaredSchemas(globalNamespace, platform) {
   // the compiler's own namespace is never the spec's
   const topLevel = [...globalNamespace.namespaces].filter(([name]) => name !== "TypeSpec");
   if (!topLevel.some(([name]) => name === "public")) throw new Error("no `public` namespace in spec");
@@ -39,13 +43,28 @@ export function declaredSchemas(globalNamespace) {
 
   // pg_cron's job list is not a schema: a function declared there lands in `public`
   const owners = topLevel
-    .filter(([name, ns]) => name !== "public" && name !== "cron" && owns(ns))
+    .filter(([name, ns]) => name !== "public" && name !== "cron" && ownedNames(ns).length)
     .map(([name]) => name);
-  const platform = owners.filter((name) => PLATFORM_SCHEMAS.includes(name));
-  if (platform.length) {
-    throw new Error(`${platform.join(", ")} is a platform schema the spec cannot own objects in: mark its tables @external`);
+  const owned = owners.filter((name) => platform.schemas.includes(name));
+  if (owned.length) {
+    throw new Error(`${owned.join(", ")} is a platform schema the spec cannot own objects in: mark its tables @external`);
   }
-  assertPlain(owners);
+  assertPlain("schema name", owners);
+
+  // Where the spec's data lives beside `public`, nothing lands there: neither
+  // what `public` declares nor a function in pg_cron's job list.
+  if (!platform.dataInPublic) {
+    const inPublic = ["public", "cron"].flatMap((name) => {
+      const ns = globalNamespace.namespaces.get(name);
+      return ns ? ownedNames(ns) : [];
+    });
+    if (inPublic.length) {
+      throw new Error(
+        `public cannot hold ${inPublic.join(", ")}: the platform keeps it empty, closed to every role but the ` +
+        `database's owner, so give each a schema of its own`,
+      );
+    }
+  }
   return ["public", ...owners];
 }
 
@@ -56,8 +75,11 @@ export const catalogKey = (schema, name) => (schema === "public" ? name : `${sch
 export const catalogKeySql = (name) =>
   `CASE WHEN n.nspname = 'public' THEN ${name} ELSE n.nspname || '.' || ${name} END`;
 
-/** A schema list as a SQL array literal, for `= ANY(...)`. */
-export function schemaArraySql(schemas) {
-  assertPlain(schemas);
-  return `'{${schemas.join(",")}}'`;
+// A plain identifier, or two of them as schema.name.
+const PLAIN_NAME = new RegExp(`^(?:${IDENTIFIER}\\.)?${IDENTIFIER}$`);
+
+/** Names as a SQL text array literal, for `= ANY(...)`: plain identifiers, or `schema.name` pairs of them. */
+export function nameArraySql(names) {
+  assertPlain("name in a catalog query", names, PLAIN_NAME);
+  return `'{${names.join(",")}}'`;
 }

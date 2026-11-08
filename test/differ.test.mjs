@@ -173,6 +173,29 @@ describe("schemas the spec declares", () => {
   });
 });
 
+describe("owners, where the platform names one", () => {
+  const owned = (owner) => ir({ tables: { "chat.rooms": table() }, owners: { table: { "chat.rooms": owner } } });
+
+  test("another_owner_is_contract_drift", () => {
+    const p = one(diff(owned("app_owner"), owned("postgres")));
+    expect(p).toMatchObject({ layer: "contract", kind: "table", key: "chat.rooms", what: "owner differs", spec: "app_owner", live: "postgres" });
+  });
+
+  test("an_object_on_one_side_only_is_reported_once_as_itself", () => {
+    const live = ir({ owners: { table: {} } });
+    expect(diff(owned("app_owner"), live).map((p) => p.what)).toEqual(["missing in database (spec expects it)"]);
+  });
+});
+
+describe("who may create, where the platform names an owner", () => {
+  const creating = (roles) => ir({ creators: { database: roles, public: [] } });
+
+  test("another_creator_is_contract_drift", () => {
+    const p = one(diff(creating([]), creating(["app_runtime"])));
+    expect(p).toMatchObject({ layer: "contract", kind: "create in", key: "database", what: "roles differs" });
+  });
+});
+
 describe("severity report", () => {
   test("clean_reports_zero_differences", () => {
     expect(report([])).toContain("0 differences");

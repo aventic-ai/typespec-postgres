@@ -26,6 +26,9 @@ export function diff(spec, live) {
     if (jstr(s) !== jstr(l)) problems.push({ layer: layerOf(kind, name), kind, key, what: `${name} differs`, spec: s, live: l });
   };
 
+  // who besides the owner may create in the database or in `public`, read where the platform names one
+  for (const [place, roles] of Object.entries(spec.creators ?? {})) facet("create in", place, "roles", roles, live.creators?.[place]);
+
   diffMaps("schema", spec.schemas, live.schemas, problems, (k, s, l) =>
     facet("schema", k, "privileges", s.privileges, l.privileges));
 
@@ -60,6 +63,14 @@ export function diff(spec, live) {
     facet("view", k, "columns", s.columns, l.columns);
     facet("view", k, "grants", s.grants, l.grants);
   });
+  // An owner is a fact of its object, read where the platform names one. An
+  // object on one side only is reported as itself, so only shared ones compare.
+  for (const [kind, owners] of Object.entries(spec.owners ?? {})) {
+    for (const [key, owner] of Object.entries(owners)) {
+      const other = live.owners?.[kind]?.[key];
+      if (other !== undefined) facet(kind, key, "owner", owner, other);
+    }
+  }
   diffMaps("cron", spec.cron, live.cron, problems, (k, s, l) => {
     facet("cron", k, "schedule", s.schedule, l.schedule);
     facet("cron", k, "command", s.command?.trim(), l.command?.trim());

@@ -1,10 +1,10 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { emit } from "../src/emitter.mjs";
-import { prelude } from "../src/prelude.mjs";
+import { SUPABASE } from "../src/platform.mjs";
 import { readCatalog } from "../src/reader.mjs";
 import { diff } from "../src/differ.mjs";
 import { sql, script } from "../src/db.mjs";
-import { clusterHasPostgrestRoles, specDir } from "./harness.mjs";
+import { clusterHasRoles, specDir } from "./harness.mjs";
 
 // What pgspec-check does, on databases named for this run: the spec's DDL
 // builds a shadow, a migration builds the database the spec describes, and
@@ -86,7 +86,7 @@ CREATE FUNCTION chat.new_token(token text, hash bytea) RETURNS record LANGUAGE s
 REVOKE ALL ON FUNCTION chat.new_token(text, bytea) FROM PUBLIC;
 `;
 
-describe.skipIf(!clusterHasPostgrestRoles())("a spec checked against the database it describes", () => {
+describe.skipIf(!clusterHasRoles(SUPABASE.roles))("a spec checked against the database it describes", () => {
   let spec;
   let live;
   let drifted;
@@ -95,8 +95,7 @@ describe.skipIf(!clusterHasPostgrestRoles())("a spec checked against the databas
     const files = Object.fromEntries(Object.entries(BODIES).map(([name, body]) => [`fn/${name}.sql`, `${body}\n`]));
     const { ddl, schemas } = await emit(specDir(SPEC, files));
     for (const db of [SHADOW, LIVE, DRIFTED]) sql("postgres", `CREATE DATABASE ${db}`);
-    script(SHADOW, prelude(SHADOW));
-    script(SHADOW, ddl);
+    script(SHADOW, SUPABASE.prelude(SHADOW) + ddl);
     script(LIVE, MIGRATION);
     script(DRIFTED, MIGRATION + DRIFT);
     [spec, live, drifted] = [SHADOW, LIVE, DRIFTED].map((db) => readCatalog(db, { schemas }));

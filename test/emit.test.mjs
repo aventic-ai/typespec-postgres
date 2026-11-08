@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 import { emit } from "../src/emitter.mjs";
+import { plainPostgres } from "../src/platform.mjs";
 import { specDir } from "./harness.mjs";
 
 describe("emit layering enforcement", () => {
@@ -51,9 +52,8 @@ namespace chat {
 
 // ── security ──────────────────────────────────────────
 @@rls(chat.rooms);
-@@grant(chat.rooms, "gx_api", "select");
-@@grant(chat.open_rooms, "gx_api", "select");
-@@grant(chat.room_count, "gx_api", "execute");
+@@grant(chat, "authenticated", "usage");
+@@grant(chat.room_count, "authenticated", "execute");
 @@policy(chat.rooms, "members read", "for select to authenticated using (true)");
 
 // ── impl ──────────────────────────────────────────────
@@ -83,7 +83,6 @@ describe("a namespace beside public is a schema of its own", () => {
   test("a_table_and_its_facts_carry_the_schema", () => {
     expect(out.ddl).toContain("CREATE TABLE chat.rooms (");
     expect(out.ddl).toContain("ALTER TABLE chat.rooms ENABLE ROW LEVEL SECURITY;");
-    expect(out.ddl).toContain("GRANT select ON chat.rooms TO gx_api;");
     expect(out.ddl).toContain('CREATE POLICY "members read" ON chat.rooms\n');
     expect(out.ddl).toContain("CREATE INDEX rooms_org_idx ON chat.rooms USING btree (org_id);");
   });
@@ -98,7 +97,7 @@ describe("a namespace beside public is a schema of its own", () => {
   test("a_function_is_created_revoked_and_granted_in_its_schema", () => {
     expect(out.ddl).toContain("CREATE FUNCTION chat.room_count() RETURNS bigint\n");
     expect(out.ddl).toContain("REVOKE ALL ON FUNCTION chat.room_count() FROM PUBLIC;");
-    expect(out.ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO gx_api;");
+    expect(out.ddl).toContain("GRANT EXECUTE ON FUNCTION chat.room_count() TO authenticated;");
   });
 
   test("a_trigger_names_the_schema_its_function_lives_in", () => {
@@ -115,7 +114,6 @@ describe("a namespace beside public is a schema of its own", () => {
 
   test("a_view_and_its_projection_carry_the_schema", () => {
     expect(out.ddl).toContain("CREATE VIEW chat.open_rooms WITH (security_invoker=true) AS\n");
-    expect(out.ddl).toContain("GRANT select ON chat.open_rooms TO gx_api;");
     expect(out.projections).toEqual({ "chat.open_rooms": [["id", "uuid"]] });
   });
 
@@ -343,7 +341,7 @@ describe("USAGE on a schema opens it to the functions granted there", () => {
 
   test("public_takes_no_schema_grant", async () => {
     await expect(emit(specDir(`${CHAT}@@grant(\`public\`, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
-      /schema public cannot be granted anything: its privileges are the platform's/,
+      /schema public cannot be granted anything: the spec grants only on the schemas it creates/,
     );
   });
 
@@ -351,6 +349,130 @@ describe("USAGE on a schema opens it to the functions granted there", () => {
     const vault = `namespace vault {\n  using \`public\`;\n  @external\n  model secrets { id: uuid; }\n}\n`;
     await expect(emit(specDir(`${CHAT}${vault}@@grant(vault, "authenticated", "usage");\n`, BODIES))).rejects.toThrow(
       "vault cannot be granted anything: it is not a schema the spec declares",
+    );
+  });
+});
+
+// Plain Postgres has no PostgREST in front of it: a role the schema opens
+// reaches its tables and views as well as its functions.
+describe("on plain Postgres, USAGE on a schema opens its tables and views", () => {
+  const PLAIN = plainPostgres({ owner: "app_owner", roles: ["app_runtime", "app_reader"] });
+  const CHAT = `namespace chat {
+  using \`public\`;
+  model rooms { id: uuid; }
+  @security_invoker
+  @view
+  model open_rooms { id: integer; }
+}
+`;
+  const BODIES = { "views/open_rooms.sql": "select 1 as id\n" };
+  const emitPlain = (grants) => emit(specDir(`${CHAT}${grants}`, BODIES), { platform: PLAIN });
+  const USAGE = `@@grant(chat, "app_runtime", "usage");\n`;
+
+  test.each([
+    ["a_table", "rooms"],
+    ["a_view", "open_rooms"],
+  ])("%s_there_is_granted_once_the_schema_is_open", async (_kind, target) => {
+    const { ddl } = await emitPlain(`${USAGE}@@grant(chat.${target}, "app_runtime", "select");\n`);
+    expect(ddl).toContain("GRANT USAGE ON SCHEMA chat TO app_runtime;");
+    expect(ddl).toContain(`GRANT select ON chat.${target} TO app_runtime;`);
+  });
+
+  test("a_table_stays_closed_until_the_schema_is_open", async () => {
+    await expect(emitPlain(`@@grant(chat.rooms, "app_runtime", "select");\n`)).rejects.toThrow(
+      'app_runtime cannot be granted anything on chat.rooms: schema chat is closed to app_runtime until the spec ' +
+      'grants it USAGE, with @@grant(chat, "app_runtime", "usage")',
+    );
+  });
+
+  // PUBLIC reaches each of the platform's roles, so each needs USAGE. The
+  // owner, which holds every privilege on what it owns, needs none.
+  test("a_grant_to_public_needs_usage_for_each_of_the_platforms_roles", async () => {
+    await expect(emitPlain(`@@grant(chat.rooms, "public", "select");\n`)).rejects.toThrow(
+      /^public cannot be granted anything on chat\.rooms: a grant to public reaches app_runtime, and schema chat is closed to app_runtime /,
+    );
+    await expect(emitPlain(`${USAGE}@@grant(chat.rooms, "public", "select");\n`)).rejects.toThrow(
+      /^public cannot be granted anything on chat\.rooms: a grant to public reaches app_reader, and schema chat is closed to app_reader /,
+    );
+    const { ddl } = await emitPlain(`${USAGE}@@grant(chat, "app_reader", "usage");\n@@grant(chat.rooms, "public", "select");\n`);
+    expect(ddl).toContain("GRANT select ON chat.rooms TO public;");
+  });
+});
+
+// The emitter can tell whether a grant can be used only for a role it knows.
+describe("a grant names public or one of the platform's roles", () => {
+  const PLAIN = plainPostgres({ owner: "app_owner", roles: ["app_runtime"] });
+  const CHAT = `namespace chat {\n  using \`public\`;\n  model rooms { id: uuid; }\n}\n`;
+  const emitPlain = (grants) => emit(specDir(`${CHAT}${grants}`), { platform: PLAIN });
+  const refused = (role, target) =>
+    `${role} cannot be granted anything on ${target}: a grant names public or one of the platform's roles, app_runtime`;
+
+  test("a_table_grant_to_another_role_is_refused", async () => {
+    await expect(emitPlain(`@@grant(chat, "app_runtime", "usage");\n@@grant(chat.rooms, "app_runtme", "select");\n`))
+      .rejects.toThrow(refused("app_runtme", "chat.rooms"));
+  });
+
+  test("a_schema_grant_to_another_role_is_refused", async () => {
+    await expect(emitPlain(`@@grant(chat, "app_runtme", "usage");\n`)).rejects.toThrow(refused("app_runtme", "schema chat"));
+  });
+
+  // It holds every privilege on what it owns, and the check never reads its grants.
+  test("a_grant_to_the_owner_is_refused", async () => {
+    await expect(emitPlain(`@@grant(chat.rooms, "app_owner", "select");\n`)).rejects.toThrow(refused("app_owner", "chat.rooms"));
+  });
+
+  test("on_supabase_a_grant_to_a_role_postgrest_never_signs_in_as_is_refused", async () => {
+    const main = specDir(`namespace \`public\` {\n  model probes { id: uuid; }\n}\n@@grant(\`public\`.probes, "supabase_auth_admin", "select");\n`);
+    await expect(emit(main)).rejects.toThrow(
+      "supabase_auth_admin cannot be granted anything on public.probes: a grant names public or one of the " +
+      "platform's roles, anon, authenticated, service_role",
+    );
+  });
+});
+
+// The emitter creates nothing on a table another system owns, and the check
+// reads nothing there but the policies on a platform's policy tables.
+describe("a table another system owns takes only the policies the platform reads", () => {
+  const PROBES = `namespace \`public\` {\n  model probes { id: uuid; }\n}\n`;
+  const external = (ns, model) => `namespace ${ns} {\n  using \`public\`;\n  @external\n  model ${model} {}\n}\n`;
+  const POLICY = `"for select to authenticated using (true)"`;
+
+  test("on_supabase_a_policy_on_storage_objects_is_emitted", async () => {
+    const { ddl } = await emit(specDir(`${PROBES}${external("storage", "objects")}@@policy(storage.objects, "own files", ${POLICY});\n`));
+    expect(ddl).toContain('CREATE POLICY "own files" ON storage.objects\nfor select to authenticated using (true);');
+  });
+
+  test.each([
+    ["a_policy_on_another_storage_table", "storage", "buckets", `@@policy(storage.buckets, "own buckets", ${POLICY});`, "@policy"],
+    ["a_grant", "vault", "secrets", `@@grant(vault.secrets, "authenticated", "select");`, "@grant"],
+  ])("on_supabase_%s_is_refused", async (_kind, ns, model, declaration, decorator) => {
+    await expect(emit(specDir(`${PROBES}${external(ns, model)}${declaration}\n`))).rejects.toThrow(
+      `${ns}.${model} is @external: the emitter creates nothing on a table another system owns, so its ` +
+      `${decorator} would never be checked; only storage.objects and realtime.messages take a @policy`,
+    );
+  });
+
+  // A decorator the emitter would act on anywhere else, a view included, is refused here.
+  test("on_supabase_a_view_is_refused", async () => {
+    const vault = `namespace vault {\n  using \`public\`;\n  @external\n  @view\n  model shown { id: uuid; }\n}\n`;
+    await expect(emit(specDir(`${PROBES}${vault}`))).rejects.toThrow(/^vault\.shown is @external: .* its @view would never be checked/);
+  });
+
+  test("on_supabase_a_primary_key_and_a_check_on_a_column_are_refused", async () => {
+    const vault = `namespace vault {\n  using \`public\`;\n  @external\n  @pk("id")\n  model secrets {\n` +
+      `    @check("(id IS NOT NULL)")\n    id: uuid;\n    label: text = "none";\n  }\n}\n`;
+    await expect(emit(specDir(`${PROBES}${vault}`))).rejects.toThrow(
+      "vault.secrets is @external: the emitter creates nothing on a table another system owns, so its " +
+      "@pk, @check on id, a default on label would never be checked; only storage.objects and realtime.messages take a @policy",
+    );
+  });
+
+  test("on_plain_postgres_no_such_table_takes_a_policy", async () => {
+    const main = specDir(`${external("storage", "objects")}@@policy(storage.objects, "own files", ${POLICY});\n`);
+    const platform = plainPostgres({ owner: "app_owner", roles: ["authenticated"] });
+    await expect(emit(main, { platform })).rejects.toThrow(
+      "storage.objects is @external: the emitter creates nothing on a table another system owns, so its " +
+      "@policy would never be checked",
     );
   });
 });
