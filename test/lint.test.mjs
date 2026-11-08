@@ -119,7 +119,7 @@ describe("a schema's own grants", () => {
     });
     expect(violations.length).toBe(1);
     expect(violations[0].message).toBe(
-      "@@grant on schema chat names public: a schema opens to the roles it names, and PUBLIC reaches anon too",
+      "@@grant on schema chat names public: a schema opens to the roles it names, and PUBLIC reaches every role",
     );
   });
 

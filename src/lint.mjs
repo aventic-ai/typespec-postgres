@@ -134,16 +134,15 @@ function ownLineViolation(type, label, problems) {
   return false;
 }
 
-// A schema opens to the roles it names. PUBLIC would open it to anon as well,
-// and the reader, which counts what each PostgREST role can do, could not
-// tell that grant from one to each of them.
+// A schema opens to the roles it names. PUBLIC would open it to every role in
+// the cluster, not only the ones the check compares.
 function schemaGrantToPublicProblem(ns, problems) {
   const grant = ns.decorators.find((d) => d.definition?.name === "@grant" && d.args[0]?.jsValue === "public");
   if (!grant) return;
   const loc = getSourceLocation(grant.node ?? ns.node);
   if (!loc || isLibrary(loc.file.path)) return;
   problems.push(problem(loc,
-    `@@grant on schema ${ns.name} names public: a schema opens to the roles it names, and PUBLIC reaches anon too`));
+    `@@grant on schema ${ns.name} names public: a schema opens to the roles it names, and PUBLIC reaches every role`));
 }
 
 // The emitter reads a mode only from an op's parameters, so on a column, a

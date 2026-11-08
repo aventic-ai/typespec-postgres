@@ -6,11 +6,23 @@ import { mkdtempSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { compile, NodeHost } from "@typespec/compiler";
 import { lintLayers } from "../src/lint.mjs";
 import { rows } from "../src/db.mjs";
+import { nameArraySql } from "../src/schemas.mjs";
 
 const LIB = fileURLToPath(new URL("../lib/main.tsp", import.meta.url));
+const CHECK = fileURLToPath(new URL("../src/check.mjs", import.meta.url));
+
+/** Runs pgspec-check with `args`, and `env` over this process's; returns its exit status and output. */
+export function runCheck(args, env = {}) {
+  const { status, stdout, stderr } = spawnSync(process.execPath, [CHECK, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+  return { status, stdout, stderr };
+}
 
 export async function compileSpec(files) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "pgspec-test-")));
@@ -51,14 +63,20 @@ export function specDir(body, files = {}) {
 }
 
 // A test that reads a real catalog runs only when the SPEC_DB_* cluster
-// answers and carries the PostgREST roles its fixture grants to, as
-// pgspec-check requires.
-export function clusterHasPostgrestRoles() {
+// answers, and only when the cluster carries the roles its fixture grants to,
+// as pgspec-check requires, or lets the test make its own.
+export function clusterAnswers() {
   if (!process.env.SPEC_DB_PASSWORD) return false;
   try {
-    const found = rows("postgres", "SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated', 'service_role')");
-    return found.length === 3;
+    rows("postgres", "SELECT 1");
+    return true;
   } catch {
     return false;
   }
 }
+
+export const clusterHasRoles = (roles) =>
+  clusterAnswers() && rows("postgres", `SELECT rolname FROM pg_roles WHERE rolname = ANY(${nameArraySql(roles)})`).length === roles.length;
+
+export const canCreateRoles = () =>
+  clusterAnswers() && rows("postgres", "SELECT rolsuper OR rolcreaterole AS can FROM pg_roles WHERE rolname = current_user")[0].can;

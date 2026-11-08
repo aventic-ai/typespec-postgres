@@ -1,12 +1,8 @@
-// Shadow prelude: minimal stand-ins for platform-owned surfaces the spec's
-// objects reference. Signature-compatible stubs; never compared.
+// Supabase's shadow prelude: minimal stand-ins for platform-owned surfaces the
+// spec's objects reference. Signature-compatible stubs; never compared.
 import { SEARCH_PATH } from "./db.mjs";
 
-// The schemas created below, which no spec may own an object in. The
-// statements are written by hand; a test holds this list to them.
-export const PLATFORM_SCHEMAS = ["extensions", "auth", "storage", "realtime"];
-
-export const prelude = (db) => `
+export const supabasePrelude = (db) => `
 -- Supabase installs extensions outside public, reachable via search_path.
 CREATE SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
